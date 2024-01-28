@@ -1,0 +1,12 @@
+syntax = "proto3";
+package raft;
+
+service Heartbeat {
+    rpc Ping (HeartbeatRequest) returns (HeartbeatReponse);
+}
+
+message HeartbeatRequest {
+}
+
+message HeartbeatReponse {
+}
