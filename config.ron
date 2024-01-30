@@ -1,0 +1,9 @@
+(
+    persistent_state_file: "not used",
+    cluster_members: [ // not used currently either
+        "127.0.0.1:47812",
+        "127.0.0.1:38419",
+        "127.0.0.1:29123",
+    ],
+    election_timeout_interval: RangeInclusive(start: 2000.0, end: 4000.0),
+)
