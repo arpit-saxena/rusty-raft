@@ -1,13 +1,11 @@
 use super::pb::raft_server::Raft;
 use super::pb::{AppendEntriesRequest, AppendEntriesResponse, VoteRequest, VoteResponse};
 
+use super::Node;
 use tonic::{Request, Response, Status};
 
-#[derive(Debug, Default)]
-pub struct RaftService {}
-
 #[tonic::async_trait]
-impl Raft for RaftService {
+impl Raft for Node {
     async fn append_entries(
         &self,
         _: Request<AppendEntriesRequest>,

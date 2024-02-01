@@ -6,7 +6,8 @@ use std::str::FromStr;
 use futures::future::join_all;
 use rand::distributions::{Distribution, Uniform};
 
-use rand::thread_rng;
+use rand::rngs::SmallRng;
+use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, Instant};
 use tonic::transport::{Channel, Endpoint, Uri};
@@ -78,7 +79,7 @@ impl Node {
         heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         let distribution = Uniform::from(config.election_timeout_interval.clone());
-        let rng = thread_rng();
+        let rng = SmallRng::from_entropy();
         let (peers, listen_addr) = Self::peers_from_config(config, node_index).await?;
         let mut node = Node {
             persistent_state: state::Persistent::new(),

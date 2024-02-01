@@ -2,7 +2,7 @@ use std::pin::Pin;
 
 use node::{state, PeerNode};
 use rand::distributions::Uniform;
-use rand::rngs::ThreadRng;
+use rand::rngs::SmallRng;
 use tokio::time::{Interval, Sleep};
 use tonic::transport::Uri;
 use tracing::info;
@@ -21,7 +21,7 @@ pub struct Node {
     heartbeat_interval: Pin<Box<Interval>>,
 
     timer_distribution: Uniform<f32>,
-    rng: ThreadRng,
+    rng: SmallRng,
     peers: Vec<PeerNode>,
     listen_addr: Uri,
 }
