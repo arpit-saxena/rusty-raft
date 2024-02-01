@@ -1,5 +1,6 @@
 use super::pb::raft_server::Raft;
 use super::pb::{AppendEntriesRequest, AppendEntriesResponse, VoteRequest, VoteResponse};
+
 use tonic::{Request, Response, Status};
 
 #[derive(Debug, Default)]
@@ -13,13 +14,13 @@ impl Raft for RaftService {
     ) -> Result<Response<AppendEntriesResponse>, Status> {
         // let reply = AppendEntriesResponse{term: 0, success: false};
         // Ok(Response::new(reply))
-        unimplemented!()
+        todo!();
     }
 
     async fn request_vote(
         &self,
         _request: Request<VoteRequest>,
     ) -> Result<Response<VoteResponse>, Status> {
-        unimplemented!()
+        todo!()
     }
 }

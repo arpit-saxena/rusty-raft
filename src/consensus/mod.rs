@@ -1,3 +1,10 @@
+use std::pin::Pin;
+
+use node::{state, PeerNode};
+use rand::distributions::Uniform;
+use rand::rngs::ThreadRng;
+use tokio::time::{Interval, Sleep};
+use tonic::transport::Uri;
 use tracing::info;
 
 mod pb {
@@ -7,7 +14,17 @@ mod pb {
 mod node;
 mod service;
 
-pub use node::Node;
+/// Raft Node with members used for establishing consensus
+pub struct Node {
+    persistent_state: state::Persistent,
+    election_timer: Pin<Box<Sleep>>,
+    heartbeat_interval: Pin<Box<Interval>>,
+
+    timer_distribution: Uniform<f32>,
+    rng: ThreadRng,
+    peers: Vec<PeerNode>,
+    listen_addr: Uri,
+}
 
 pub fn hello() {
     info!("Hello hello");

@@ -1,18 +1,19 @@
 use std::fs::File;
 use std::ops::RangeInclusive;
-use std::pin::Pin;
+
 use std::str::FromStr;
 
 use futures::future::join_all;
 use rand::distributions::{Distribution, Uniform};
-use rand::rngs::ThreadRng;
+
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
-use tokio::time::{Duration, Instant, Interval, Sleep};
+use tokio::time::{Duration, Instant};
 use tonic::transport::{Channel, Endpoint, Uri};
 use tracing::trace;
 
 use super::pb::raft_client::RaftClient;
+use super::Node;
 
 type Message = Vec<u8>;
 
@@ -23,7 +24,7 @@ pub trait StateMachine {
     fn transition(msg: Message);
 }
 
-mod state {
+pub mod state {
     use super::{Message, PeerNode};
 
     /// This State is updated on stable storage before responding to RPCs
@@ -45,18 +46,6 @@ mod state {
             }
         }
     }
-}
-
-/// Raft Node with members used for establishing consensus
-pub struct Node {
-    persistent_state: state::Persistent,
-    election_timer: Pin<Box<Sleep>>,
-    heartbeat_interval: Pin<Box<Interval>>,
-
-    timer_distribution: Uniform<f32>,
-    rng: ThreadRng,
-    peers: Vec<PeerNode>,
-    listen_addr: Uri,
 }
 
 /// Configuration for Raft Consensus, can be read from any file, currently only RON is supported
@@ -167,7 +156,7 @@ impl Node {
 
 /// Represents information about a peer node that a particular node has and owns
 /// grpc client to the particular peer
-struct PeerNode {
+pub struct PeerNode {
     address: Uri,
     rpc_client: RaftClient<Channel>,
     node_index: usize,
