@@ -1,26 +1,18 @@
-use std::collections::HashMap;
 use std::fs::File;
-use std::future::Future;
-use std::hash::Hash;
 use std::ops::RangeInclusive;
 use std::pin::Pin;
 use std::str::FromStr;
 
 use futures::future::join_all;
-use futures::TryFutureExt;
 use rand::distributions::{Distribution, Uniform};
 use rand::rngs::ThreadRng;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, Instant, Interval, Sleep};
-use tonic::client;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tracing::trace;
 
-use crate::consensus::pb::raft_server::Raft;
-
 use super::pb::raft_client::RaftClient;
-use super::service::RaftService;
 
 type Message = Vec<u8>;
 
@@ -88,7 +80,10 @@ impl Config {
 }
 
 impl Node {
-    pub async fn new(config_path: &str, node_index: usize) -> Result<Node, Box<dyn std::error::Error>> {
+    pub async fn new(
+        config_path: &str,
+        node_index: usize,
+    ) -> Result<Node, Box<dyn std::error::Error>> {
         let config = Config::from_file(config_path)?;
         let mut heartbeat_interval = Box::pin(tokio::time::interval(config.heartbeat_interval));
         heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -133,14 +128,17 @@ impl Node {
                 Ok(PeerNode::from_address(uri, idx))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let peers: Vec<PeerNode> = join_all(peer_node_futures).await.into_iter().collect::<Result<_, _>>()?;
+        let peers: Vec<PeerNode> = join_all(peer_node_futures)
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()?;
 
         Ok((peers, listen_addr))
     }
 
-    fn reset_election_timer(self: &mut Self) {
+    fn reset_election_timer(&mut self) {
         let timeout = Duration::from_micros(
-            (self.timer_distribution.sample(&mut self.rng) * 1000. as f32).floor() as u64,
+            (self.timer_distribution.sample(&mut self.rng) * 1000_f32).floor() as u64,
         );
         trace!("New election timeout is {} millis", timeout.as_millis());
         self.election_timer.as_mut().reset(Instant::now() + timeout);
@@ -148,7 +146,7 @@ impl Node {
 
     /// Process the next event
     // TODO: Should this be async?
-    pub async fn tick(self: &mut Self) {
+    pub async fn tick(&mut self) {
         // Tick the election timer
         let election_timer = self.election_timer.as_mut();
         tokio::select! {
@@ -176,13 +174,20 @@ struct PeerNode {
 }
 
 impl PeerNode {
-    async fn from_address(address: Uri, node_index: usize) -> Result<PeerNode, Box<dyn std::error::Error>> {
+    async fn from_address(
+        address: Uri,
+        node_index: usize,
+    ) -> Result<PeerNode, Box<dyn std::error::Error>> {
         trace!("Creating peer node with index {node_index} to address {address}");
 
         let endpoint = Endpoint::new(address.clone())?;
         let channel = endpoint.connect_lazy();
         let rpc_client = RaftClient::new(channel);
-        let peer_node: PeerNode = PeerNode{address, rpc_client, node_index};
+        let peer_node: PeerNode = PeerNode {
+            address,
+            rpc_client,
+            node_index,
+        };
         Ok(peer_node)
     }
 }

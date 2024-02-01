@@ -17,7 +17,7 @@ impl Raft for RaftService {
 
     async fn request_vote(
         &self,
-        request: Request<VoteRequest>,
+        _request: Request<VoteRequest>,
     ) -> Result<Response<VoteResponse>, Status> {
         unimplemented!()
     }

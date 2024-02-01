@@ -21,7 +21,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = "config.ron";
     let mut raft_node = match Node::new(config_path, cli.node_id).await {
         Err(e) => {
-            eprintln!("Error in creating node using config path '{config_path}': {:#?}", e);
+            eprintln!(
+                "Error in creating node using config path '{config_path}': {:#?}",
+                e
+            );
             exit(1);
         }
         Ok(n) => n,
