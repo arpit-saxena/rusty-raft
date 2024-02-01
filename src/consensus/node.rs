@@ -1,14 +1,26 @@
+use std::collections::HashMap;
 use std::fs::File;
-use std::net::SocketAddr;
+use std::future::Future;
+use std::hash::Hash;
 use std::ops::RangeInclusive;
 use std::pin::Pin;
+use std::str::FromStr;
 
+use futures::future::join_all;
+use futures::TryFutureExt;
 use rand::distributions::{Distribution, Uniform};
 use rand::rngs::ThreadRng;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, Instant, Interval, Sleep};
+use tonic::client;
+use tonic::transport::{Channel, Endpoint, Uri};
 use tracing::trace;
+
+use crate::consensus::pb::raft_server::Raft;
+
+use super::pb::raft_client::RaftClient;
+use super::service::RaftService;
 
 type Message = Vec<u8>;
 
@@ -51,7 +63,8 @@ pub struct Node {
 
     timer_distribution: Uniform<f32>,
     rng: ThreadRng,
-    config: Config,
+    peers: Vec<PeerNode>,
+    listen_addr: Uri,
 }
 
 /// Configuration for Raft Consensus, can be read from any file, currently only RON is supported
@@ -59,7 +72,7 @@ pub struct Node {
 #[derive(Debug, Serialize, Deserialize)]
 struct Config {
     persistent_state_file: String,
-    cluster_members: Vec<SocketAddr>,
+    cluster_members: Vec<String>, // vector of Uri's
     election_timeout_interval: RangeInclusive<f32>,
     #[serde_as(as = "serde_with::DurationMilliSeconds")]
     heartbeat_interval: Duration,
@@ -75,23 +88,54 @@ impl Config {
 }
 
 impl Node {
-    pub fn new(config_path: &str) -> Result<Node, Box<dyn std::error::Error>> {
+    pub async fn new(config_path: &str, node_index: usize) -> Result<Node, Box<dyn std::error::Error>> {
         let config = Config::from_file(config_path)?;
         let mut heartbeat_interval = Box::pin(tokio::time::interval(config.heartbeat_interval));
         heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         let distribution = Uniform::from(config.election_timeout_interval.clone());
         let rng = thread_rng();
+        let (peers, listen_addr) = Self::peers_from_config(config, node_index).await?;
         let mut node = Node {
             persistent_state: state::Persistent::new(),
             election_timer: Box::pin(tokio::time::sleep(Duration::from_secs(0))),
             heartbeat_interval,
             timer_distribution: distribution,
             rng,
-            config,
+            peers,
+            listen_addr,
         };
         node.reset_election_timer();
         Ok(node)
+    }
+
+    async fn peers_from_config(
+        config: Config,
+        node_index: usize,
+    ) -> Result<(Vec<PeerNode>, Uri), Box<dyn std::error::Error>> {
+        let cluster_members = config.cluster_members;
+        if node_index >= cluster_members.len() {
+            return Err(format!(
+                "node_index {node_index} not valid for {} cluster members",
+                cluster_members.len()
+            )
+            .into());
+        }
+
+        let listen_addr = Uri::from_str(&cluster_members[node_index])?;
+        let peer_node_futures = cluster_members
+            .into_iter()
+            .enumerate()
+            .filter(|(idx, _)| *idx != node_index)
+            .map(|(idx, uri_str)| -> Result<_, Box<dyn std::error::Error>> {
+                let uri = Uri::from_str(&uri_str)?;
+                trace!("Calling PeerNode constructor for index {idx}");
+                Ok(PeerNode::from_address(uri, idx))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let peers: Vec<PeerNode> = join_all(peer_node_futures).await.into_iter().collect::<Result<_, _>>()?;
+
+        Ok((peers, listen_addr))
     }
 
     fn reset_election_timer(self: &mut Self) {
@@ -110,15 +154,44 @@ impl Node {
         tokio::select! {
             () = election_timer => {
                 trace!("Hey the election timer just expired do something about it");
-                self.reset_election_timer();
+                // call function which will increment current term and call RequestVote RPC to all peers
+                // On receiving response update some info about number of votes received and when majority
+                // votes are received, election is done, send heartbeats.
             }
             _ = self.heartbeat_interval.tick() => {
                 trace!("Heartbeat interval expired send heartbeat");
                 // TODO: Send heartbeat
             }
         };
+        self.reset_election_timer();
     }
 }
 
-/// Represents information about a peer node that a particular node has
-struct PeerNode {}
+/// Represents information about a peer node that a particular node has and owns
+/// grpc client to the particular peer
+struct PeerNode {
+    address: Uri,
+    rpc_client: RaftClient<Channel>,
+    node_index: usize,
+}
+
+impl PeerNode {
+    async fn from_address(address: Uri, node_index: usize) -> Result<PeerNode, Box<dyn std::error::Error>> {
+        trace!("Creating peer node with index {node_index} to address {address}");
+
+        let endpoint = Endpoint::new(address.clone())?;
+        let channel = endpoint.connect_lazy();
+        let rpc_client = RaftClient::new(channel);
+        let peer_node: PeerNode = PeerNode{address, rpc_client, node_index};
+        Ok(peer_node)
+    }
+}
+
+mod test {
+    /*
+     * TODO: tests
+     * 1. Node::new
+     * 2. election timer reset
+     * 3. Config::from_file
+     */
+}

@@ -5,6 +5,7 @@ mod pb {
 }
 
 mod node;
+mod service;
 
 pub use node::Node;
 

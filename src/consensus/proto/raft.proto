@@ -1,12 +1,31 @@
 syntax = "proto3";
 package raft;
 
-service Heartbeat {
-    rpc Ping (HeartbeatRequest) returns (HeartbeatReponse);
+service Raft {
+  rpc Ping (HeartbeatRequest) returns (HeartbeatResponse);
+  rpc RequestVote (VoteRequest) returns (VoteResponse);
 }
 
 message HeartbeatRequest {
 }
 
-message HeartbeatReponse {
+message HeartbeatResponse {
+}
+
+message VoteRequest {
+  // candidate's term
+  int32 term = 1;
+  // candidate requesting vote
+  int32 candidate_id = 2; // TODO: Perhaps can be taken from rpc metadata
+  // index of candidate's last log entry
+  int64 last_log_index = 3;
+  // term of candidate's last log entry
+  int64 last_log_term = 4;
+}
+
+message VoteResponse {
+  // currentTerm, for candidate to update itself
+  int32 term = 1;
+  // true means candidate received vote
+  bool voteGranted = 2;
 }
