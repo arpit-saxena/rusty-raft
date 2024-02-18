@@ -9,41 +9,44 @@ use rand::distributions::{Distribution, Uniform};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
+use tokio::fs::File as TokioFile;
 use tokio::time::{Duration, Instant};
 use tonic::transport::{Channel, Endpoint, Uri};
 use tracing::trace;
 
 use super::pb::raft_client::RaftClient;
-use super::Node;
+use super::{Node, StateWriter};
 
 type Message = Vec<u8>;
 
-pub trait Writer {
-    fn write(msg: Message);
-}
 pub trait StateMachine {
     fn transition(msg: Message);
 }
 
 pub mod state {
+    use super::StateWriter;
+
     use super::{Message, PeerNode};
 
     /// This State is updated on stable storage before responding to RPCs
-    pub struct Persistent {
+    pub struct Persistent<Writer: StateWriter> {
         /// latest term server has seen (initialized to 0 on first boot, increases monotonically)
         current_term: u32,
         /// candidateId that received vote in current term (or None if not voted)
         voted_for: Option<Box<PeerNode>>,
         /// logbook, vector of (message, term); all logs might not be applied
-        log: Vec<(Message, u32)>,
+        // log: Vec<(Message, u32)>,
+        /// writer that will interact with storage to read/write state
+        writer: Writer,
     }
 
-    impl Persistent {
-        pub fn new() -> Self {
+    impl<Writer: StateWriter> Persistent<Writer> {
+        pub fn new(writer: Writer) -> Self {
             Persistent {
                 current_term: 0,
                 voted_for: None,
-                log: vec![],
+                // log: vec![],
+                writer,
             }
         }
     }
@@ -69,20 +72,23 @@ impl Config {
     }
 }
 
-impl Node {
+impl Node<TokioFile> {
     pub async fn new(
         config_path: &str,
         node_index: usize,
-    ) -> Result<Node, Box<dyn std::error::Error>> {
-        let config = Config::from_file(config_path)?;
+    ) -> Result<Node<TokioFile>, Box<dyn std::error::Error>> {
+        let mut config = Config::from_file(config_path)?;
         let mut heartbeat_interval = Box::pin(tokio::time::interval(config.heartbeat_interval));
         heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        let persistent_state_path = std::mem::take(&mut config.persistent_state_file);
+        let persistent_state_file = TokioFile::open(persistent_state_path).await?;
 
         let distribution = Uniform::from(config.election_timeout_interval.clone());
         let rng = SmallRng::from_entropy();
         let (peers, listen_addr) = Self::peers_from_config(config, node_index).await?;
         let mut node = Node {
-            persistent_state: state::Persistent::new(),
+            persistent_state: state::Persistent::new(persistent_state_file),
             election_timer: Box::pin(tokio::time::sleep(Duration::from_secs(0))),
             heartbeat_interval,
             timer_distribution: distribution,

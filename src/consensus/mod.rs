@@ -3,7 +3,10 @@ use std::pin::Pin;
 use node::{state, PeerNode};
 use rand::distributions::Uniform;
 use rand::rngs::SmallRng;
-use tokio::time::{Interval, Sleep};
+use tokio::{
+    io::{AsyncRead, AsyncWrite, AsyncSeek},
+    time::{Interval, Sleep},
+};
 use tonic::transport::Uri;
 use tracing::info;
 
@@ -14,9 +17,12 @@ mod pb {
 mod node;
 mod service;
 
+pub trait StateWriter: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + 'static {}
+impl<T> StateWriter for T where T: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + 'static {}
+
 /// Raft Node with members used for establishing consensus
-pub struct Node {
-    persistent_state: state::Persistent,
+pub struct Node<Writer: StateWriter> {
+    persistent_state: state::Persistent<Writer>,
     election_timer: Pin<Box<Sleep>>,
     heartbeat_interval: Pin<Box<Interval>>,
 
