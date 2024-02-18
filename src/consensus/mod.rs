@@ -4,7 +4,7 @@ use node::{state, PeerNode};
 use rand::distributions::Uniform;
 use rand::rngs::SmallRng;
 use tokio::{
-    io::{AsyncRead, AsyncWrite, AsyncSeek},
+    io::{AsyncRead, AsyncSeek, AsyncWrite},
     time::{Interval, Sleep},
 };
 use tonic::transport::Uri;

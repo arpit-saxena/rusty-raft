@@ -24,9 +24,8 @@ pub trait StateMachine {
 }
 
 pub mod state {
+    use super::PeerNode;
     use super::StateWriter;
-
-    use super::{Message, PeerNode};
 
     /// This State is updated on stable storage before responding to RPCs
     pub struct Persistent<Writer: StateWriter> {
@@ -82,7 +81,12 @@ impl Node<TokioFile> {
         heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         let persistent_state_path = std::mem::take(&mut config.persistent_state_file);
-        let persistent_state_file = TokioFile::open(persistent_state_path).await?;
+        let persistent_state_file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .read(true)
+            .create(true)
+            .open(persistent_state_path)
+            .await?;
 
         let distribution = Uniform::from(config.election_timeout_interval.clone());
         let rng = SmallRng::from_entropy();

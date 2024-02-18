@@ -1,5 +1,5 @@
 (
-    persistent_state_file: "not used",
+    persistent_state_file: "data.raft",
     cluster_members: [ // not used currently either
         "http://127.0.0.1:47812",
         "http://127.0.0.1:38419",
