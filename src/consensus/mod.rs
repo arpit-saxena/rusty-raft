@@ -13,6 +13,7 @@ mod pb {
     tonic::include_proto!("raft");
 }
 
+mod io_util;
 mod node;
 mod service;
 mod state;
