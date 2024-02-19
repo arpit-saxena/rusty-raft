@@ -18,8 +18,8 @@ mod service;
 mod state;
 use pb::raft_client::RaftClient;
 
-pub trait StateFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + 'static {}
-impl<T> StateFile for T where T: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + 'static {}
+pub trait StateFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + 'static + Unpin {}
+impl<T> StateFile for T where T: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + 'static + Unpin {}
 
 /// Raft Node with members used for establishing consensus
 pub struct Node<SFile: StateFile> {

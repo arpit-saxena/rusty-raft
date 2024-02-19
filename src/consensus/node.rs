@@ -65,7 +65,7 @@ impl Node<TokioFile> {
         let rng = SmallRng::from_entropy();
         let (peers, listen_addr) = Self::peers_from_config(config, node_index).await?;
         let mut node = Node {
-            persistent_state: state::Persistent::new(persistent_state_file),
+            persistent_state: state::Persistent::new(persistent_state_file).await?,
             election_timer: Box::pin(tokio::time::sleep(Duration::from_secs(0))),
             heartbeat_interval,
             timer_distribution: distribution,
