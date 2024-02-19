@@ -55,7 +55,7 @@ impl Node<TokioFile> {
 
         let persistent_state_path = std::mem::take(&mut config.persistent_state_file);
         let persistent_state_file = tokio::fs::OpenOptions::new()
-            .append(true)
+            .write(true)
             .read(true)
             .create(true)
             .open(persistent_state_path)
