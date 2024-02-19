@@ -11,44 +11,17 @@ use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use tokio::fs::File as TokioFile;
 use tokio::time::{Duration, Instant};
-use tonic::transport::{Channel, Endpoint, Uri};
+use tonic::transport::{Endpoint, Uri};
 use tracing::trace;
 
 use super::pb::raft_client::RaftClient;
-use super::{Node, StateWriter};
+use super::state;
+use super::{Node, PeerNode};
 
 type Message = Vec<u8>;
 
 pub trait StateMachine {
     fn transition(msg: Message);
-}
-
-pub mod state {
-    use super::PeerNode;
-    use super::StateWriter;
-
-    /// This State is updated on stable storage before responding to RPCs
-    pub struct Persistent<Writer: StateWriter> {
-        /// latest term server has seen (initialized to 0 on first boot, increases monotonically)
-        current_term: u32,
-        /// candidateId that received vote in current term (or None if not voted)
-        voted_for: Option<Box<PeerNode>>,
-        /// logbook, vector of (message, term); all logs might not be applied
-        // log: Vec<(Message, u32)>,
-        /// writer that will interact with storage to read/write state
-        writer: Writer,
-    }
-
-    impl<Writer: StateWriter> Persistent<Writer> {
-        pub fn new(writer: Writer) -> Self {
-            Persistent {
-                current_term: 0,
-                voted_for: None,
-                // log: vec![],
-                writer,
-            }
-        }
-    }
 }
 
 /// Configuration for Raft Consensus, can be read from any file, currently only RON is supported
@@ -163,14 +136,6 @@ impl Node<TokioFile> {
         };
         self.reset_election_timer();
     }
-}
-
-/// Represents information about a peer node that a particular node has and owns
-/// grpc client to the particular peer
-pub struct PeerNode {
-    address: Uri,
-    rpc_client: RaftClient<Channel>,
-    node_index: usize,
 }
 
 impl PeerNode {

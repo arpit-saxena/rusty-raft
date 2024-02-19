@@ -1,13 +1,12 @@
 use std::pin::Pin;
 
-use node::{state, PeerNode};
 use rand::distributions::Uniform;
 use rand::rngs::SmallRng;
 use tokio::{
     io::{AsyncRead, AsyncSeek, AsyncWrite},
     time::{Interval, Sleep},
 };
-use tonic::transport::Uri;
+use tonic::transport::{Channel, Uri};
 use tracing::info;
 
 mod pb {
@@ -16,6 +15,8 @@ mod pb {
 
 mod node;
 mod service;
+mod state;
+use pb::raft_client::RaftClient;
 
 pub trait StateWriter: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + 'static {}
 impl<T> StateWriter for T where T: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + 'static {}
@@ -30,6 +31,14 @@ pub struct Node<Writer: StateWriter> {
     rng: SmallRng,
     peers: Vec<PeerNode>,
     listen_addr: Uri,
+}
+
+/// Represents information about a peer node that a particular node has and owns
+/// grpc client to the particular peer
+pub struct PeerNode {
+    address: Uri,
+    rpc_client: RaftClient<Channel>,
+    node_index: usize,
 }
 
 pub fn hello() {
