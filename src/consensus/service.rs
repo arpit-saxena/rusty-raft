@@ -1,11 +1,11 @@
 use super::pb::raft_server::Raft;
 use super::pb::{AppendEntriesRequest, AppendEntriesResponse, VoteRequest, VoteResponse};
 
-use super::{Node, StateWriter};
+use super::{Node};
 use tonic::{Request, Response, Status};
 
 #[tonic::async_trait]
-impl<Writer: StateWriter> Raft for Node<Writer> {
+impl<StateFile: super::StateFile> Raft for Node<StateFile> {
     async fn append_entries(
         &self,
         _: Request<AppendEntriesRequest>,

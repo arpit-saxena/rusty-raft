@@ -18,12 +18,12 @@ mod service;
 mod state;
 use pb::raft_client::RaftClient;
 
-pub trait StateWriter: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + 'static {}
-impl<T> StateWriter for T where T: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + 'static {}
+pub trait StateFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + 'static {}
+impl<T> StateFile for T where T: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + 'static {}
 
 /// Raft Node with members used for establishing consensus
-pub struct Node<Writer: StateWriter> {
-    persistent_state: state::Persistent<Writer>,
+pub struct Node<SFile: StateFile> {
+    persistent_state: state::Persistent<SFile>,
     election_timer: Pin<Box<Sleep>>,
     heartbeat_interval: Pin<Box<Interval>>,
 
