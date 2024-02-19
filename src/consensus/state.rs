@@ -1,10 +1,9 @@
-use std::{fs::File, io::SeekFrom};
+use std::io::SeekFrom;
 
-use tokio::io::{AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tracing::trace;
 
 use super::io_util::GenericByteIO;
-use super::PeerNode;
 
 /// This State is updated on stable storage before responding to RPCs
 pub struct Persistent<StateFile: super::StateFile> {
@@ -123,5 +122,22 @@ impl<T: Copy> FileData<T> {
             position: SeekFrom::Start(position_from_start),
             data,
         })
+    }
+
+    async fn write<StateFile>(
+        &mut self,
+        data: T,
+        state_file: &mut StateFile,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        StateFile: super::StateFile + GenericByteIO<T>,
+    {
+        let current_position = state_file.stream_position().await?;
+        state_file.seek(self.position).await?;
+        state_file.write_little_endian(data).await?;
+        state_file.flush().await?; // Be really sure this value is written to disk
+        self.data = data;
+        state_file.seek(SeekFrom::Start(current_position)).await?;
+        Ok(())
     }
 }
