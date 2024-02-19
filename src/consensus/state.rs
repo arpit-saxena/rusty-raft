@@ -94,30 +94,32 @@ where
 }
 
 impl<T: Copy> FileData<T> {
+    /// Construct FileData from given data by writing to the file at current offset
     async fn from_state_file_write<StateFile>(
         data: T,
         state_file: &mut StateFile,
-    ) -> Result<FileData<T>, Box<dyn std::error::Error>>
+    ) -> Result<Self, Box<dyn std::error::Error>>
     where
         StateFile: super::StateFile + GenericByteIO<T>,
     {
         let position_from_start = state_file.stream_position().await?;
         state_file.write_little_endian(data).await?;
-        Ok(FileData {
+        Ok(Self {
             position: SeekFrom::Start(position_from_start),
             data,
         })
     }
 
+    /// Construct FileData by reading data from the file at current offset
     async fn from_state_file_read<StateFile>(
         state_file: &mut StateFile,
-    ) -> Result<FileData<T>, Box<dyn std::error::Error>>
+    ) -> Result<Self, Box<dyn std::error::Error>>
     where
         StateFile: super::StateFile + GenericByteIO<T>,
     {
         let position_from_start = state_file.stream_position().await?;
         let data = state_file.read_little_endian().await?;
-        Ok(FileData {
+        Ok(Self {
             position: SeekFrom::Start(position_from_start),
             data,
         })
