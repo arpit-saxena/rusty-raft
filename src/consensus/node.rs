@@ -169,8 +169,9 @@ impl Node<TokioFile> {
         }
 
         for (idx, result) in join_all(heartbeat_futures).await.into_iter().enumerate() {
+            // TODO: Convert to match and check response. If response's term is greater than our term, revert to follower
             if let Err(e) = result {
-                // Fine to not be able to send heartbeat to a peer
+                // TODO: Have to retry here. All failed RPC's have to retried indefinitely (Paper section 5.5)
                 let peer = &self.peers[idx];
                 debug!("Unable to send heartbeat to peer {}, address {}: {}", peer.node_index, peer.address, e);
             }
