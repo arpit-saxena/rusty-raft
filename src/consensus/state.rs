@@ -17,6 +17,23 @@ pub struct Persistent<StateFile: super::StateFile> {
     state_file: StateFile,
 }
 
+/// Volatile per-follower state that is stored only for a leader
+pub struct VolatileFollowerState {
+    /// index of the next log entry to send to that server (initialized to leader last log index + 1)
+    pub next_index: u32,
+    /// index of highest log entry known to be replicated on the server (initialized to 0, increases monotonically)
+    pub match_index: u32,
+}
+
+pub struct Volatile {
+    /// index of highest log entry known to be committed (initialized to 0, increases monotonically)
+    pub commit_index: u32,
+    /// index of highest log entry applied to state machine (initialized to 0, increases monotonically)
+    pub last_applied: u32,
+    /// only contains data for leaders
+    pub follower_states: Option<Vec<VolatileFollowerState>>, 
+}
+
 const STATE_MAGIC_BYTES: u64 = 0x6d3d5b9932220a79;
 const STATE_FILE_VERSION: u32 = 1;
 
@@ -78,6 +95,25 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
             // log: vec![],
             state_file,
         })
+    }
+}
+
+impl VolatileFollowerState {
+    pub fn new() -> VolatileFollowerState {
+        VolatileFollowerState {
+            next_index: 1, // TODO: Initialize this properly
+            match_index: 0,
+        }
+    }
+}
+
+impl Volatile {
+    pub fn new() -> Volatile {
+        Volatile {
+            commit_index: 0,
+            last_applied: 0,
+            follower_states: None,
+        }
     }
 }
 
