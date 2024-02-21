@@ -7,7 +7,7 @@ use tracing::trace;
 
 #[derive(Parser)]
 struct Cli {
-    node_id: usize,
+    node_id: u32,
 }
 
 #[tokio::main]

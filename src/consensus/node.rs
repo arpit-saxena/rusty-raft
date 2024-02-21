@@ -1,22 +1,24 @@
 use std::fs::File;
 use std::ops::RangeInclusive;
-
 use std::str::FromStr;
 
 use futures::future::join_all;
 use rand::distributions::{Distribution, Uniform};
-
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use tokio::fs::File as TokioFile;
 use tokio::time::{Duration, Instant};
 use tonic::transport::{Endpoint, Uri};
-use tracing::trace;
+use tracing::{debug, trace};
+
+use crate::consensus::pb;
 
 use super::pb::raft_client::RaftClient;
 use super::state;
 use super::{Node, PeerNode};
+
+use super::service;
 
 type Message = Vec<u8>;
 
@@ -47,7 +49,7 @@ impl Config {
 impl Node<TokioFile> {
     pub async fn new(
         config_path: &str,
-        node_index: usize,
+        node_index: u32,
     ) -> Result<Node<TokioFile>, Box<dyn std::error::Error>> {
         let mut config = Config::from_file(config_path)?;
         let mut heartbeat_interval = Box::pin(tokio::time::interval(config.heartbeat_interval));
@@ -63,10 +65,13 @@ impl Node<TokioFile> {
 
         let distribution = Uniform::from(config.election_timeout_interval.clone());
         let rng = SmallRng::from_entropy();
-        let (peers, listen_addr) = Self::peers_from_config(config, node_index).await?;
+        let (peers, listen_addr) = Self::peers_from_config(config, node_index as usize).await?;
         let election_timeout = Duration::from_secs(0);
         let mut node = Node {
             persistent_state: state::Persistent::new(persistent_state_file).await?,
+            common_volatile_state: state::VolatileCommon::new(),
+            leader_volatile_state: None,
+            node_index,
             election_timeout,
             election_timer: Box::pin(tokio::time::sleep(election_timeout)),
             heartbeat_interval,
@@ -137,11 +142,39 @@ impl Node<TokioFile> {
                 self.set_new_election_timeout();
             }
             _ = self.heartbeat_interval.tick() => {
+                // TODO: Don't tick heartbeat if not leader
                 trace!("Heartbeat interval expired send heartbeat");
-                // TODO: Send heartbeat
+                if self.leader_volatile_state.is_some() {
+                    self.send_heartbeat().await;
+                }
             }
         };
         self.restart_election_timer();
+    }
+
+    async fn send_heartbeat(&mut self) {
+        trace!("Sending heartbeat to all peers");
+
+        let append_entries_request = pb::AppendEntriesRequest{
+            term: self.persistent_state.current_term(),
+            leader_id: self.node_index,
+            prev_log_index: 0, // FIXME
+            prev_log_term: 0, // FIXME
+            leader_commit: self.common_volatile_state.commit_index,
+        };
+
+        let mut heartbeat_futures = Vec::new();
+        for peer in &mut self.peers {
+            heartbeat_futures.push(peer.rpc_client.append_entries(tonic::Request::new(append_entries_request.clone())));
+        }
+
+        for (idx, result) in join_all(heartbeat_futures).await.into_iter().enumerate() {
+            if let Err(e) = result {
+                // Fine to not be able to send heartbeat to a peer
+                let peer = &self.peers[idx];
+                debug!("Unable to send heartbeat to peer {}, address {}: {}", peer.node_index, peer.address, e);
+            }
+        }
     }
 }
 

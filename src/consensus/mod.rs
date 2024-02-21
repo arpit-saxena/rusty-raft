@@ -25,6 +25,9 @@ impl<T> StateFile for T where T: AsyncRead + AsyncWrite + AsyncSeek + Send + Syn
 /// Raft Node with members used for establishing consensus
 pub struct Node<SFile: StateFile> {
     persistent_state: state::Persistent<SFile>,
+    common_volatile_state: state::VolatileCommon,
+    leader_volatile_state: Option<state::VolatileLeader>,
+    node_index: u32,
     election_timeout: Duration,
     election_timer: Pin<Box<Sleep>>,
     heartbeat_interval: Pin<Box<Interval>>,
