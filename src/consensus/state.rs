@@ -10,7 +10,7 @@ pub struct Persistent<StateFile: super::StateFile> {
     /// latest term server has seen (initialized to 0 on first boot, increases monotonically)
     current_term: FileData<u32>,
     /// candidateId that received vote in current term (or -1 if not voted)
-    voted_for: FileData<i32>,
+    voted_for: FileData<i32>, // TODO: Maybe store reference to PeerNode?
     /// logbook, vector of (message, term); all logs might not be applied
     // log: Vec<(Message, u32)>,
     /// file like object that will interact with storage to read/write persistent state
@@ -71,8 +71,6 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
             current_term,
             voted_for,
         );
-
-        // TODO: Convert voted_for to PeerNode reference
 
         Ok(Persistent {
             current_term,

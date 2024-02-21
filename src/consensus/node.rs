@@ -64,16 +64,18 @@ impl Node<TokioFile> {
         let distribution = Uniform::from(config.election_timeout_interval.clone());
         let rng = SmallRng::from_entropy();
         let (peers, listen_addr) = Self::peers_from_config(config, node_index).await?;
+        let election_timeout = Duration::from_secs(0);
         let mut node = Node {
             persistent_state: state::Persistent::new(persistent_state_file).await?,
-            election_timer: Box::pin(tokio::time::sleep(Duration::from_secs(0))),
+            election_timeout,
+            election_timer: Box::pin(tokio::time::sleep(election_timeout)),
             heartbeat_interval,
             timer_distribution: distribution,
             rng,
             peers,
             listen_addr,
         };
-        node.reset_election_timer();
+        node.set_new_election_timeout();
         Ok(node)
     }
 
@@ -109,12 +111,16 @@ impl Node<TokioFile> {
         Ok((peers, listen_addr))
     }
 
-    fn reset_election_timer(&mut self) {
+    fn set_new_election_timeout(&mut self) {
         let timeout = Duration::from_micros(
             (self.timer_distribution.sample(&mut self.rng) * 1000_f32).floor() as u64,
         );
         trace!("New election timeout is {} millis", timeout.as_millis());
-        self.election_timer.as_mut().reset(Instant::now() + timeout);
+        self.election_timeout = timeout;
+    }
+
+    fn restart_election_timer(&mut self) {
+        self.election_timer.as_mut().reset(Instant::now() + self.election_timeout);
     }
 
     /// Process the next event
@@ -125,16 +131,17 @@ impl Node<TokioFile> {
         tokio::select! {
             () = election_timer => {
                 trace!("Hey the election timer just expired do something about it");
-                // call function which will increment current term and call RequestVote RPC to all peers
+                // TODO: call function which will increment current term and call RequestVote RPC to all peers
                 // On receiving response update some info about number of votes received and when majority
                 // votes are received, election is done, send heartbeats.
+                self.set_new_election_timeout();
             }
             _ = self.heartbeat_interval.tick() => {
                 trace!("Heartbeat interval expired send heartbeat");
                 // TODO: Send heartbeat
             }
         };
-        self.reset_election_timer();
+        self.restart_election_timer();
     }
 }
 

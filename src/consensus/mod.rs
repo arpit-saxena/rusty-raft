@@ -4,7 +4,7 @@ use rand::distributions::Uniform;
 use rand::rngs::SmallRng;
 use tokio::{
     io::{AsyncRead, AsyncSeek, AsyncWrite},
-    time::{Interval, Sleep},
+    time::{Interval, Sleep, Duration},
 };
 use tonic::transport::{Channel, Uri};
 use tracing::info;
@@ -25,6 +25,7 @@ impl<T> StateFile for T where T: AsyncRead + AsyncWrite + AsyncSeek + Send + Syn
 /// Raft Node with members used for establishing consensus
 pub struct Node<SFile: StateFile> {
     persistent_state: state::Persistent<SFile>,
+    election_timeout: Duration,
     election_timer: Pin<Box<Sleep>>,
     heartbeat_interval: Pin<Box<Interval>>,
 
