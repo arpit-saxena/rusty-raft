@@ -1,4 +1,4 @@
-use std::pin::Pin;
+use std::{collections::HashMap, pin::Pin};
 
 use rand::distributions::Uniform;
 use rand::rngs::SmallRng;
@@ -34,7 +34,8 @@ pub struct Node<SFile: StateFile> {
 
     timer_distribution: Uniform<f32>,
     rng: SmallRng,
-    peers: Vec<PeerNode>,
+    /// map from peer_id to PeerNode
+    peers: HashMap<usize, PeerNode>,
     listen_addr: Uri,
 }
 

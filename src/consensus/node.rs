@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::ops::RangeInclusive;
 use std::str::FromStr;
@@ -87,7 +88,7 @@ impl Node<TokioFile> {
     async fn peers_from_config(
         config: Config,
         node_index: usize,
-    ) -> Result<(Vec<PeerNode>, Uri), Box<dyn std::error::Error>> {
+    ) -> Result<(HashMap<usize, PeerNode>, Uri), Box<dyn std::error::Error>> {
         let cluster_members = config.cluster_members;
         if node_index >= cluster_members.len() {
             return Err(format!(
@@ -108,10 +109,12 @@ impl Node<TokioFile> {
                 Ok(PeerNode::from_address(uri, idx))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        
         let peers: Vec<PeerNode> = join_all(peer_node_futures)
             .await
             .into_iter()
             .collect::<Result<_, _>>()?;
+        let peers = peers.into_iter().map(|p| (p.node_index, p)).collect();
 
         Ok((peers, listen_addr))
     }
@@ -163,19 +166,19 @@ impl Node<TokioFile> {
             leader_commit: self.common_volatile_state.commit_index,
         };
 
-        let mut heartbeat_futures = Vec::new();
-        for peer in &mut self.peers {
-            heartbeat_futures.push(peer.rpc_client.append_entries(tonic::Request::new(append_entries_request.clone())));
-        }
+        // let mut heartbeat_futures = Vec::new();
+        // for (_, peer) in &mut self.peers {
+        //     heartbeat_futures.push(peer.rpc_client.append_entries(tonic::Request::new(append_entries_request.clone())));
+        // }
 
-        for (idx, result) in join_all(heartbeat_futures).await.into_iter().enumerate() {
-            // TODO: Convert to match and check response. If response's term is greater than our term, revert to follower
-            if let Err(e) = result {
-                // TODO: Have to retry here. All failed RPC's have to retried indefinitely (Paper section 5.5)
-                let peer = &self.peers[idx];
-                debug!("Unable to send heartbeat to peer {}, address {}: {}", peer.node_index, peer.address, e);
-            }
-        }
+        // for (idx, result) in join_all(heartbeat_futures).await.into_iter().enumerate() {
+        //     // TODO: Convert to match and check response. If response's term is greater than our term, revert to follower
+        //     if let Err(e) = result {
+        //         // TODO: Have to retry here. All failed RPC's have to retried indefinitely (Paper section 5.5)
+        //         let peer = &self.peers[idx];
+        //         debug!("Unable to send heartbeat to peer {}, address {}: {}", peer.node_index, peer.address, e);
+        //     }
+        // }
     }
 }
 
