@@ -1,10 +1,14 @@
-use std::{collections::HashMap, pin::Pin, sync::{Arc, Mutex}};
+use std::{
+    collections::HashMap,
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
 
 use rand::distributions::Uniform;
 use rand::rngs::SmallRng;
 use tokio::{
     io::{AsyncRead, AsyncSeek, AsyncWrite},
-    time::{Interval, Sleep, Duration},
+    time::{Duration, Interval, Sleep},
 };
 use tonic::transport::{Channel, Uri};
 use tracing::info;
@@ -13,7 +17,7 @@ mod pb {
     tonic::include_proto!("raft");
 }
 
-mod io_util;
+mod macro_util;
 mod node;
 mod service;
 mod state;

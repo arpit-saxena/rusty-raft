@@ -90,12 +90,12 @@ impl NodeClient<TokioFile> {
         };
         node.set_new_election_timeout();
 
-        let node_server = NodeServer{
-            node_common,
-        };
-        tokio::spawn(Server::builder()
-            .add_service(RaftServer::new(node_server))
-            .serve(listen_addr));
+        let node_server = NodeServer { node_common };
+        tokio::spawn(
+            Server::builder()
+                .add_service(RaftServer::new(node_server))
+                .serve(listen_addr),
+        );
 
         Ok(node)
     }
@@ -124,7 +124,7 @@ impl NodeClient<TokioFile> {
                 Ok(PeerNode::from_address(uri, idx))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        
+
         let peers: Vec<PeerNode> = join_all(peer_node_futures)
             .await
             .into_iter()
@@ -143,7 +143,9 @@ impl NodeClient<TokioFile> {
     }
 
     fn restart_election_timer(&mut self) {
-        self.election_timer.as_mut().reset(Instant::now() + self.election_timeout);
+        self.election_timer
+            .as_mut()
+            .reset(Instant::now() + self.election_timeout);
     }
 
     /// Process the next event
@@ -173,11 +175,11 @@ impl NodeClient<TokioFile> {
     async fn send_heartbeat(&mut self) {
         trace!("Sending heartbeat to all peers");
 
-        let append_entries_request = pb::AppendEntriesRequest{
+        let append_entries_request = pb::AppendEntriesRequest {
             term: self.node_common.persistent_state.current_term(),
             leader_id: self.node_common.node_index,
             prev_log_index: 0, // FIXME
-            prev_log_term: 0, // FIXME
+            prev_log_term: 0,  // FIXME
             leader_commit: self.common_volatile_state.commit_index,
         };
 

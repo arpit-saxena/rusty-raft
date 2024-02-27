@@ -1,6 +1,6 @@
 use super::pb::raft_server::Raft;
 use super::pb::{AppendEntriesRequest, AppendEntriesResponse, VoteRequest, VoteResponse};
-use super::{NodeServer, NodeClient};
+use super::{NodeClient, NodeServer};
 
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
