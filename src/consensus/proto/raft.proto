@@ -14,7 +14,7 @@ message AppendEntriesRequest {
   // index of log entry immediately preceding new ones
   uint64 prev_log_index = 3;
   // term of prevLogIndex entry
-  int32 prev_log_term = 4;
+  uint32 prev_log_term = 4;
   // TODO: Add entries variable
   // leader's commitIndex
   uint64 leader_commit = 5;
@@ -22,16 +22,16 @@ message AppendEntriesRequest {
 
 message AppendEntriesResponse {
   // currentTerm, for leader to update itself
-  int32 term = 1;
+  uint32 term = 1;
   // true if follower contained entry matching prevLogIndex and prevLogTerm
   bool success = 2;
 }
 
 message VoteRequest {
   // candidate's term
-  int32 term = 1;
+  uint32 term = 1;
   // candidate requesting vote
-  int32 candidate_id = 2; // TODO: Perhaps can be taken from rpc metadata
+  uint32 candidate_id = 2; // TODO: Perhaps can be taken from rpc metadata
   // index of candidate's last log entry
   uint64 last_log_index = 3;
   // term of candidate's last log entry
@@ -40,7 +40,7 @@ message VoteRequest {
 
 message VoteResponse {
   // currentTerm, for candidate to update itself
-  int32 term = 1;
+  uint32 term = 1;
   // true means candidate received vote
   bool vote_granted = 2;
 }

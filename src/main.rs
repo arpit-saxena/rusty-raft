@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     loop {
         trace!("Ticking RaftNode");
-        raft_node.tick().await;
+        raft_node.tick().await?;
     }
 
     // Ok(())

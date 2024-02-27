@@ -38,6 +38,12 @@ pub struct VolatileLeader {
     pub follower_states: Vec<VolatileFollowerState>,
 }
 
+/// Volatile state that is stored only on candidates
+pub struct VolatileCandidate {
+    /// number of votes received
+    pub votes_received: usize,
+}
+
 const STATE_MAGIC_BYTES: u64 = 0x6d3d5b9932220a79;
 const STATE_FILE_VERSION: u32 = 1;
 
@@ -102,6 +108,13 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
     }
     pub fn current_term(&self) -> u32 {
         self.current_term.get_data()
+    }
+    pub async fn update_current_term(
+        &self,
+        new_term: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.current_term.write(new_term, &self.state_file).await?;
+        Ok(())
     }
 }
 

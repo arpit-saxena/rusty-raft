@@ -8,6 +8,7 @@ use rand::distributions::Uniform;
 use rand::rngs::SmallRng;
 use tokio::{
     io::{AsyncRead, AsyncSeek, AsyncWrite},
+    task::JoinSet,
     time::{Duration, Interval, Sleep},
 };
 use tonic::transport::{Channel, Uri};
@@ -26,6 +27,19 @@ use pb::raft_client::RaftClient;
 pub trait StateFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + 'static + Unpin {}
 impl<T> StateFile for T where T: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + 'static + Unpin {}
 
+enum NodeRole {
+    Follower,
+    Candidate(state::VolatileCandidate),
+    Leader(state::VolatileLeader),
+}
+
+enum TaskResult {
+    // TODO: Rename
+    VoteResponse(pb::VoteResponse),
+    /// node index to which request failed, to retry
+    VoteFail(usize),
+}
+
 pub struct NodeCommon<SFile: StateFile> {
     persistent_state: state::Persistent<SFile>,
     node_index: u32,
@@ -36,14 +50,18 @@ pub struct NodeClient<SFile: StateFile> {
     node_common: Arc<NodeCommon<SFile>>,
     common_volatile_state: state::VolatileCommon,
     leader_volatile_state: Option<state::VolatileLeader>,
-    election_timeout: Duration,
-    election_timer: Pin<Box<Sleep>>,
-    heartbeat_interval: Pin<Box<Interval>>,
+    role: NodeRole,
 
-    timer_distribution: Uniform<f32>,
+    election_timeout: Duration,
+    election_timer_distribution: Uniform<f32>,
+    heartbeat_interval: Duration,
+    /// This timer is used as heartbeat timer when Leader, election timeout otherwise
+    timer: Pin<Box<Sleep>>,
+
     rng: SmallRng,
     /// map from peer_id to PeerNode
     peers: HashMap<usize, PeerNode>,
+    jobs: JoinSet<TaskResult>,
 }
 
 pub struct NodeServer<SFile: StateFile> {
