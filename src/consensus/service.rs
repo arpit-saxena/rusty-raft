@@ -1,9 +1,9 @@
 use super::pb::raft_server::Raft;
 use super::pb::{AppendEntriesRequest, AppendEntriesResponse, VoteRequest, VoteResponse};
-use super::{NodeClient, NodeServer};
+use super::NodeServer;
 
-use std::sync::Arc;
 use tonic::{Request, Response, Status};
+use tokio::time::Instant;
 use tracing::trace;
 
 #[tonic::async_trait]
@@ -12,9 +12,13 @@ impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
         &self,
         _: Request<AppendEntriesRequest>,
     ) -> Result<Response<AppendEntriesResponse>, Status> {
-        // let reply = AppendEntriesResponse{term: 0, success: false};
-        // Ok(Response::new(reply))
-        todo!();
+        trace!("Append entries called");
+        {
+            let mut last_leader_message_time = self.last_leader_message_time.lock().map_err(|_| Status::internal("Poison error"))?;
+            *last_leader_message_time = Instant::now();
+        }
+        let reply = AppendEntriesResponse{term: self.node_common.persistent_state.lock().await.current_term(), success: true};
+        Ok(Response::new(reply))
     }
 
     async fn request_vote(
@@ -41,7 +45,12 @@ impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
             }
         };
 
-        trace!("request_vote called, vote_granted = {}, candidate_id = {}, term = {}", vote_granted, request.candidate_id, persistent_state.current_term());
+        trace!(
+            "request_vote called, vote_granted = {}, candidate_id = {}, term = {}",
+            vote_granted,
+            request.candidate_id,
+            persistent_state.current_term()
+        );
         let vote_response = VoteResponse {
             term: persistent_state.current_term(),
             vote_granted,

@@ -1,9 +1,9 @@
-use std::{fmt::Debug, io::SeekFrom};
+use std::{collections::HashMap, fmt::Debug, io::SeekFrom};
 
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tracing::trace;
 
-use super::macro_util::GenericByteIO;
+use super::{macro_util::GenericByteIO, PeerNode};
 
 /// This State is updated on stable storage before responding to RPCs
 pub struct Persistent<StateFile: super::StateFile> {
@@ -35,7 +35,7 @@ pub struct VolatileFollowerState {
 
 /// Volatile state that is stored only on leaders
 pub struct VolatileLeader {
-    pub follower_states: Vec<VolatileFollowerState>,
+    pub follower_states: HashMap<usize, VolatileFollowerState>,
 }
 
 /// Volatile state that is stored only on candidates
@@ -133,7 +133,11 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
             .write(self.current_term.data + 1, &mut self.state_file)
             .await?;
         self.voted_for.write(node_id, &mut self.state_file).await?;
-        trace!("Incremented current term to {} and voted for {}", self.current_term.data, node_id);
+        trace!(
+            "Incremented current term to {} and voted for {}",
+            self.current_term.data,
+            node_id
+        );
         Ok(())
     }
     pub async fn grant_vote_if_possible(
@@ -158,6 +162,16 @@ impl VolatileFollowerState {
             next_index: 1, // TODO: Initialize this properly
             match_index: 0,
         }
+    }
+}
+
+impl VolatileLeader {
+    pub fn new(peers: &HashMap<usize, PeerNode>) -> VolatileLeader {
+        let mut follower_states = HashMap::new();
+        for (peer_id, _) in peers {
+            follower_states.insert(*peer_id, VolatileFollowerState::new());
+        }
+        VolatileLeader{ follower_states }
     }
 }
 

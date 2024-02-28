@@ -5,7 +5,7 @@ use rand::rngs::SmallRng;
 use tokio::{
     io::{AsyncRead, AsyncSeek, AsyncWrite},
     task::JoinSet,
-    time::{Duration, Interval, Sleep},
+    time::{Duration, Interval, Sleep, Instant},
 };
 use tonic::transport::{Channel, Uri};
 use tracing::info;
@@ -34,6 +34,9 @@ enum TaskResult {
     VoteResponse(pb::VoteResponse),
     /// node index to which request failed, to retry
     VoteFail(usize),
+    HeartbeatSuccess(usize, pb::AppendEntriesResponse),
+    /// node index to which request failed, to retry
+    HeartbeatFail(usize),
 }
 
 pub struct NodeCommon<SFile: StateFile> {
@@ -45,7 +48,6 @@ pub struct NodeCommon<SFile: StateFile> {
 pub struct NodeClient<SFile: StateFile> {
     node_common: Arc<NodeCommon<SFile>>,
     common_volatile_state: state::VolatileCommon,
-    leader_volatile_state: Option<state::VolatileLeader>,
     role: NodeRole,
 
     election_timeout: Duration,
@@ -53,6 +55,8 @@ pub struct NodeClient<SFile: StateFile> {
     heartbeat_interval: Duration,
     /// This timer is used as heartbeat timer when Leader, election timeout otherwise
     timer: Pin<Box<Sleep>>,
+    /// This is used to reset the election timer, and is updated by server on receiving append entries RPCs
+    last_leader_message_time: Arc<std::sync::Mutex<Instant>>,
 
     rng: SmallRng,
     /// map from peer_id to PeerNode
@@ -62,6 +66,7 @@ pub struct NodeClient<SFile: StateFile> {
 
 pub struct NodeServer<SFile: StateFile> {
     node_common: Arc<NodeCommon<SFile>>,
+    last_leader_message_time: Arc<std::sync::Mutex<Instant>>,
 }
 
 /// Represents information about a peer node that a particular node has and owns
@@ -70,6 +75,9 @@ pub struct PeerNode {
     address: Uri,
     rpc_client: RaftClient<Channel>,
     node_index: usize,
+    /// Only used by leaders, true if a heartbeat is pending that will be retried
+    /// This will ensure we don't queue up more heartbeats than necessary
+    pending_heartbeat: bool,
 }
 
 pub fn hello() {

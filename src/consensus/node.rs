@@ -57,7 +57,8 @@ impl NodeClient<TokioFile> {
     ) -> Result<NodeClient<TokioFile>, Box<dyn std::error::Error>> {
         let mut config = Config::from_file(config_path)?;
 
-        let mut persistent_state_path = PathBuf::from(std::mem::take(&mut config.persistent_state_file));
+        let mut persistent_state_path =
+            PathBuf::from(std::mem::take(&mut config.persistent_state_file));
         let file_name_suffix = persistent_state_path
             .file_name()
             .ok_or("File name should be present in persistent_state_file")?
@@ -86,24 +87,25 @@ impl NodeClient<TokioFile> {
             node_index,
         });
 
+        let last_leader_message_time = Arc::new(std::sync::Mutex::new(Instant::now()));
         let mut node = NodeClient {
             node_common: Arc::clone(&node_common),
             common_volatile_state: state::VolatileCommon::new(),
-            leader_volatile_state: None,
             role: NodeRole::Follower,
             election_timeout,
             election_timer_distribution: distribution,
             heartbeat_interval,
             timer,
+            last_leader_message_time: Arc::clone(&last_leader_message_time),
             rng,
             peers,
             jobs: JoinSet::new(),
         };
         node.set_new_election_timeout();
-        node.restart_election_timer();
+        node.update_election_timer();
 
         trace!("Spawning server to listen on {}", listen_addr);
-        let node_server = NodeServer { node_common };
+        let node_server = NodeServer { node_common, last_leader_message_time };
         tokio::spawn(
             Server::builder()
                 .add_service(RaftServer::new(node_server))
@@ -159,34 +161,63 @@ impl NodeClient<TokioFile> {
         self.election_timeout = timeout;
     }
 
-    fn restart_election_timer(&mut self) {
-        self.timer
-            .as_mut()
-            .reset(Instant::now() + self.election_timeout);
+    fn update_election_timer(&mut self) {
+        match &self.role {
+            NodeRole::Leader(_) => {}
+            _ => {
+                self.timer
+                .as_mut()
+                .reset(*self.last_leader_message_time.lock().unwrap() + self.election_timeout);
+            }
+        }
+    }
+
+    fn reset_and_update_election_timer(&mut self) {
+        {
+            let mut last_leader_message_time = self.last_leader_message_time.lock().unwrap();
+            *last_leader_message_time = Instant::now();
+        }
+        self.update_election_timer();
+    }
+
+    fn restart_heartbeat_timer(&mut self) {
+        self.timer.as_mut().reset(Instant::now() + self.heartbeat_interval);
     }
 
     /// Process the next event
     // TODO: Should this be async?
     pub async fn tick(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.update_election_timer();
         let timer = self.timer.as_mut();
         tokio::select! {
             () = timer => {
-                // trace!("Timer expired, current role is {:?}", self.role);
-                match &self.role {
-                    NodeRole::Follower => {
-                        self.become_candidate().await?;
+                // Update election timer again. If it has elapsed then do election stuff
+                self.update_election_timer();
+                if self.timer.is_elapsed() {
+                    match &self.role {
+                        NodeRole::Follower => {
+                            self.reset_and_update_election_timer();
+                            self.become_candidate().await?;
+                        }
+                        NodeRole::Candidate(_) => {
+                            // in case of a split vote, the election timer may expire when we're still a candidate
+                            self.reset_and_update_election_timer();
+                            self.become_candidate().await?;
+                        }
+                        NodeRole::Leader(_) => {
+                            self.restart_heartbeat_timer();
+                            self.send_heartbeats().await;
+                        }
                     }
-                    NodeRole::Candidate(_) => {}
-                    NodeRole::Leader(_) => {}
+                } else {
+                    debug!("This tick won't do anything since timer got updated after select");
                 }
-                self.restart_election_timer();
-                // do something about the timer
             }
             Some(res) = self.jobs.join_next(), if self.jobs.len() > 0 => {
                 match res {
                     Err(join_error) => {
                         if join_error.is_panic() {
-                            info!("Some task panicked..");
+                            error!("Some task panicked..");
                         }
                     }
                     Ok(TaskResult::VoteResponse(vote_response)) => {
@@ -196,14 +227,19 @@ impl NodeClient<TokioFile> {
                                 candidate_state.votes_received += 1;
                                 if candidate_state.votes_received > (1 + self.peers.len()) / 2 {
                                     info!("Elected as leader woohoo");
+                                    self.role = NodeRole::Leader(state::VolatileLeader::new(&self.peers));
+                                    self.send_heartbeats().await;
+                                    self.restart_heartbeat_timer();
                                 }
                             } else {
-                                warn!("Received vote response from peer, however current role is not candidate");
+                                // This can happen when one response was delayed and we got majority votes before
+                                debug!("Received vote response from peer, however current role is not candidate");
                             }
                         } else {
                             let mut persistent_state = self.node_common.persistent_state.lock().await;
                             if vote_response.term > persistent_state.current_term() {
-                                // Our term was stale, update it and abort all RPCs
+                                // Our term was stale, update it and abort all
+                                trace!(current_term = persistent_state.current_term(), vote_response.term);
                                 persistent_state.update_current_term(vote_response.term).await?;
                                 self.jobs.shutdown().await;
                             }
@@ -214,43 +250,20 @@ impl NodeClient<TokioFile> {
                             self.request_vote(peer_id).await;
                         }
                     }
+                    Ok(TaskResult::HeartbeatSuccess(peer_id, append_response)) => {
+                        trace!(task_result = "Heartbeat success", peer_id, append_response.term, append_response.success);
+                        self.peers.get_mut(&peer_id).unwrap().pending_heartbeat = false;
+                    }
+                    Ok(TaskResult::HeartbeatFail(peer_id)) => {
+                        if let NodeRole::Leader(_) = &self.role {
+                            self.retry_heartbeat(peer_id).await;
+                        } else {
+                            debug!("Had to retry heartbeat to {}, but not doing so since we're not leader anymore", peer_id);
+                        }
+                    }
                 }
             }
         };
-
-        // let election_timer = self.election_timer.as_mut();
-        // tokio::select! {
-        //     () = election_timer => {
-        //         trace!("Hey the election timer just expired do something about it");
-        //         self.set_new_election_timeout();
-        //         self.restart_election_timer();
-
-        //         // Need to initiate sending votes but also let election timer tick...
-        //         // Observation: Election timer and heartbeat timer will never tick simultaneously
-        //         // heartbeat interval ticks when leader, election timer ticks when a follower or candidate
-
-        //         /* Keep all spawned stuffs inside a JoinSet. Note they need to have the same return type, can use an enum for that
-        //          * JoinSet will await on
-        //          * 1. election timer and
-        //          *      a. request vote RPCs (when candidate). If election timer expires before election converges, abort all the RPCs. Otherwise fine.
-        //          *      b. Nothing (when follower)
-        //          * 2. heartbeat timer (when leader) and append request RPCs.
-        //          *      - When heartbeat timer ends, schedule more heartbeat append request RPCs aborting previous heartbeat RPCs if any
-        //          *      - When append entries RPC ends, all cool
-        //          */
-        //         // TODO: call function which will increment current term and call RequestVote RPC to all peers
-        //         // On receiving response update some info about number of votes received and when majority
-        //         // votes are received, election is done, send heartbeats.
-        //     }
-        //     _ = self.heartbeat_interval.tick() => {
-        //         // TODO: Don't tick heartbeat if not leader
-        //         trace!("Heartbeat interval expired send heartbeat");
-        //         if self.leader_volatile_state.is_some() {
-        //             self.send_heartbeat().await;
-        //         }
-        //         self.restart_election_timer();
-        //     }
-        // };
 
         Ok(())
     }
@@ -313,8 +326,15 @@ impl NodeClient<TokioFile> {
         Ok(())
     }
 
-    async fn send_heartbeat(&mut self) {
-        trace!("Sending heartbeat to all peers");
+    async fn send_heartbeat(&mut self, peer_id: usize) {
+        let peer = self
+            .peers
+            .get_mut(&peer_id)
+            .expect("Expected peer_id to be valid");
+
+        if peer.pending_heartbeat {
+            return;
+        }
 
         let append_entries_request = pb::AppendEntriesRequest {
             term: self
@@ -329,19 +349,41 @@ impl NodeClient<TokioFile> {
             leader_commit: self.common_volatile_state.commit_index,
         };
 
-        // let mut heartbeat_futures = Vec::new();
-        // for (_, peer) in &mut self.peers {
-        //     heartbeat_futures.push(peer.rpc_client.append_entries(tonic::Request::new(append_entries_request.clone())));
-        // }
+        peer.pending_heartbeat = true;
+        let mut rpc_client = peer.rpc_client.clone();
+        let append_entries_request = append_entries_request.clone();
+        self.jobs.spawn(async move {
+            let request = tonic::Request::new(append_entries_request);
+            match rpc_client.append_entries(request).await {
+                Err(e) => {
+                    trace!("Append entries request to peer {} failed: {}", peer_id, e);
+                    TaskResult::HeartbeatFail(peer_id)
+                }
+                Ok(response) => {
+                    let response = response.into_inner();
+                    TaskResult::HeartbeatSuccess(peer_id, response)
+                }
+            }
+        });
+    }
 
-        // for (idx, result) in join_all(heartbeat_futures).await.into_iter().enumerate() {
-        //     // TODO: Convert to match and check response. If response's term is greater than our term, revert to follower
-        //     if let Err(e) = result {
-        //         // TODO: Have to retry here. All failed RPC's have to retried indefinitely (Paper section 5.5)
-        //         let peer = &self.peers[idx];
-        //         debug!("Unable to send heartbeat to peer {}, address {}: {}", peer.node_index, peer.address, e);
-        //     }
-        // }
+    async fn retry_heartbeat(&mut self, peer_id: usize) {
+        if let Some(peer) = self.peers.get_mut(&peer_id) {
+            peer.pending_heartbeat = false;
+            self.send_heartbeat(peer_id).await;
+        } else {
+            warn!("retry_heartbeat: Got wrong peer_id {}", peer_id);
+        }
+    }
+
+    async fn send_heartbeats(&mut self) {
+        trace!("Sending heartbeat to all peers");
+
+        // FIXME: Don't make this vec. Need to fix borrow checker issues
+        let peer_ids: Vec<usize> = self.peers.iter().map(|(id, _)| *id).collect();
+        for peer_id in peer_ids.into_iter() {
+            self.send_heartbeat(peer_id).await;
+        }
     }
 }
 
@@ -359,6 +401,7 @@ impl PeerNode {
             address,
             rpc_client,
             node_index,
+            pending_heartbeat: false,
         };
         Ok(peer_node)
     }
