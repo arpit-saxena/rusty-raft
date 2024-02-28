@@ -102,6 +102,7 @@ impl NodeClient<TokioFile> {
         node.set_new_election_timeout();
         node.restart_election_timer();
 
+        trace!("Spawning server to listen on {}", listen_addr);
         let node_server = NodeServer { node_common };
         tokio::spawn(
             Server::builder()
