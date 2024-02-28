@@ -34,14 +34,20 @@ impl_byte_writer!(i32, read_i32_le, write_i32_le);
 
 /******************************* Atomic<T> ********************************/
 // Taken from a comment on https://stackoverflow.com/a/57075792/5585431
-pub trait Atomize {
+pub trait Atomize: Sized {
     type Atom;
 
     fn atomize(self) -> Self::Atom;
     fn load(this: &Self::Atom, ordering: Ordering) -> Self;
     fn store(this: &Self::Atom, val: Self, ordering: Ordering);
     fn swap(this: &Self::Atom, val: Self, ordering: Ordering) -> Self;
-    /* ... */
+    fn compare_exchange(
+        this: &Self::Atom,
+        current: Self,
+        new: Self,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<Self, Self>;
 }
 
 macro_rules! impl_has_atomic {
@@ -63,6 +69,16 @@ macro_rules! impl_has_atomic {
 
             fn swap(this: &Self::Atom, val: Self, ordering: Ordering) -> Self {
                 this.swap(val, ordering)
+            }
+
+            fn compare_exchange(
+                this: &Self::Atom,
+                current: Self,
+                new: Self,
+                success: Ordering,
+                failure: Ordering,
+            ) -> Result<Self, Self> {
+                this.compare_exchange(current, new, success, failure)
             }
         }
     };
@@ -88,6 +104,16 @@ impl<T: Atomize + Debug> Atomic<T> {
 
     pub fn swap(&self, val: T, ordering: Ordering) -> T {
         T::swap(&self.0, val, ordering)
+    }
+
+    pub fn compare_exchange(
+        &self,
+        current: T,
+        new: T,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<T, T> {
+        T::compare_exchange(&self.0, current, new, success, failure)
     }
 }
 
