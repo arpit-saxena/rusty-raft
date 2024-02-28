@@ -1,10 +1,10 @@
 use std::collections::HashMap;
-use std::ffi::OsString;
+
 use std::fs::File;
 use std::net::SocketAddr;
-use std::ops::{DerefMut, RangeInclusive};
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
-use std::str::FromStr;
+
 use std::sync::Arc;
 
 use super::pb::raft_client::RaftClient;
@@ -17,18 +17,16 @@ use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use tokio::fs::File as TokioFile;
-use tokio::task::{JoinError, JoinSet};
-use tokio::time::{Duration, Instant, Sleep};
+use tokio::task::JoinSet;
+use tokio::time::{Duration, Instant};
 use tonic::transport::{Endpoint, Server, Uri};
 use tracing::{debug, error, info, trace, warn};
 
-use super::service;
+// type Message = Vec<u8>;
 
-type Message = Vec<u8>;
-
-pub trait StateMachine {
-    fn transition(msg: Message);
-}
+// pub trait StateMachine {
+//     fn transition(msg: Message);
+// }
 
 /// Configuration for Raft Consensus, can be read from any file, currently only RON is supported
 #[serde_with::serde_as]
@@ -105,7 +103,10 @@ impl NodeClient<TokioFile> {
         node.update_election_timer();
 
         trace!("Spawning server to listen on {}", listen_addr);
-        let node_server = NodeServer { node_common, last_leader_message_time };
+        let node_server = NodeServer {
+            node_common,
+            last_leader_message_time,
+        };
         tokio::spawn(
             Server::builder()
                 .add_service(RaftServer::new(node_server))
@@ -166,8 +167,8 @@ impl NodeClient<TokioFile> {
             NodeRole::Leader(_) => {}
             _ => {
                 self.timer
-                .as_mut()
-                .reset(*self.last_leader_message_time.lock().unwrap() + self.election_timeout);
+                    .as_mut()
+                    .reset(*self.last_leader_message_time.lock().unwrap() + self.election_timeout);
             }
         }
     }
@@ -181,7 +182,9 @@ impl NodeClient<TokioFile> {
     }
 
     fn restart_heartbeat_timer(&mut self) {
-        self.timer.as_mut().reset(Instant::now() + self.heartbeat_interval);
+        self.timer
+            .as_mut()
+            .reset(Instant::now() + self.heartbeat_interval);
     }
 
     /// Process the next event
@@ -213,7 +216,7 @@ impl NodeClient<TokioFile> {
                     debug!("This tick won't do anything since timer got updated after select");
                 }
             }
-            Some(res) = self.jobs.join_next(), if self.jobs.len() > 0 => {
+            Some(res) = self.jobs.join_next(), if !self.jobs.is_empty() => {
                 match res {
                     Err(join_error) => {
                         if join_error.is_panic() {
@@ -319,7 +322,7 @@ impl NodeClient<TokioFile> {
             .await?;
 
         // FIXME: Don't make this vec. Need to fix borrow checker issues
-        let peer_ids: Vec<usize> = self.peers.iter().map(|(id, _)| *id).collect();
+        let peer_ids: Vec<usize> = self.peers.keys().copied().collect();
         for peer_id in peer_ids.into_iter() {
             self.request_vote(peer_id).await;
         }
@@ -380,7 +383,7 @@ impl NodeClient<TokioFile> {
         trace!("Sending heartbeat to all peers");
 
         // FIXME: Don't make this vec. Need to fix borrow checker issues
-        let peer_ids: Vec<usize> = self.peers.iter().map(|(id, _)| *id).collect();
+        let peer_ids: Vec<usize> = self.peers.keys().copied().collect();
         for peer_id in peer_ids.into_iter() {
             self.send_heartbeat(peer_id).await;
         }
@@ -398,7 +401,7 @@ impl PeerNode {
         let channel = endpoint.connect_lazy();
         let rpc_client = RaftClient::new(channel);
         let peer_node: PeerNode = PeerNode {
-            address,
+            _address: address,
             rpc_client,
             node_index,
             pending_heartbeat: false,

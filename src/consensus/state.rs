@@ -168,10 +168,10 @@ impl VolatileFollowerState {
 impl VolatileLeader {
     pub fn new(peers: &HashMap<usize, PeerNode>) -> VolatileLeader {
         let mut follower_states = HashMap::new();
-        for (peer_id, _) in peers {
+        for peer_id in peers.keys() {
             follower_states.insert(*peer_id, VolatileFollowerState::new());
         }
-        VolatileLeader{ follower_states }
+        VolatileLeader { follower_states }
     }
 }
 

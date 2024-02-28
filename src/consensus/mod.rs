@@ -5,7 +5,7 @@ use rand::rngs::SmallRng;
 use tokio::{
     io::{AsyncRead, AsyncSeek, AsyncWrite},
     task::JoinSet,
-    time::{Duration, Interval, Sleep, Instant},
+    time::{Duration, Instant, Sleep},
 };
 use tonic::transport::{Channel, Uri};
 use tracing::info;
@@ -72,7 +72,7 @@ pub struct NodeServer<SFile: StateFile> {
 /// Represents information about a peer node that a particular node has and owns
 /// grpc client to the particular peer
 pub struct PeerNode {
-    address: Uri,
+    _address: Uri,
     rpc_client: RaftClient<Channel>,
     node_index: usize,
     /// Only used by leaders, true if a heartbeat is pending that will be retried

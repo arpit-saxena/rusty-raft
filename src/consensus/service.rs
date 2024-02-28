@@ -2,8 +2,8 @@ use super::pb::raft_server::Raft;
 use super::pb::{AppendEntriesRequest, AppendEntriesResponse, VoteRequest, VoteResponse};
 use super::NodeServer;
 
-use tonic::{Request, Response, Status};
 use tokio::time::Instant;
+use tonic::{Request, Response, Status};
 use tracing::trace;
 
 #[tonic::async_trait]
@@ -14,10 +14,21 @@ impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
     ) -> Result<Response<AppendEntriesResponse>, Status> {
         trace!("Append entries called");
         {
-            let mut last_leader_message_time = self.last_leader_message_time.lock().map_err(|_| Status::internal("Poison error"))?;
+            let mut last_leader_message_time = self
+                .last_leader_message_time
+                .lock()
+                .map_err(|_| Status::internal("Poison error"))?;
             *last_leader_message_time = Instant::now();
         }
-        let reply = AppendEntriesResponse{term: self.node_common.persistent_state.lock().await.current_term(), success: true};
+        let reply = AppendEntriesResponse {
+            term: self
+                .node_common
+                .persistent_state
+                .lock()
+                .await
+                .current_term(),
+            success: true,
+        };
         Ok(Response::new(reply))
     }
 
@@ -32,7 +43,11 @@ impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
             false
         } else {
             // FIXME: Error handling
-            if let Err(_) = persistent_state.update_current_term(request.term).await {
+            if persistent_state
+                .update_current_term(request.term)
+                .await
+                .is_err()
+            {
                 return Err(Status::internal("Error in updating current term"));
             }
             // TODO: Check log matching

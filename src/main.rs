@@ -3,7 +3,6 @@ use std::process::exit;
 use clap::Parser;
 use raft::consensus::NodeClient;
 use raft::log_stuffs;
-use tracing::trace;
 
 #[derive(Parser)]
 struct Cli {
