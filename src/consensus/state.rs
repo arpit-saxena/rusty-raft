@@ -113,8 +113,42 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
         &mut self,
         new_term: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.current_term.write(new_term, &mut self.state_file).await?;
+        // Only update if new term is different from old term.
+        if self.current_term.data == new_term {
+            return Ok(());
+        }
+
+        self.current_term
+            .write(new_term, &mut self.state_file)
+            .await?;
+        // New term, new node to vote for
+        self.voted_for.write(-1, &mut self.state_file).await?;
         Ok(())
+    }
+    pub async fn increment_current_term_and_vote(
+        &mut self,
+        node_id: i32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.current_term
+            .write(self.current_term.data + 1, &mut self.state_file)
+            .await?;
+        self.voted_for.write(node_id, &mut self.state_file).await?;
+        trace!("Incremented current term to {} and voted for {}", self.current_term.data, node_id);
+        Ok(())
+    }
+    pub async fn grant_vote_if_possible(
+        &mut self,
+        candidate_id: u32,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let candidate_id = candidate_id as i32;
+        if self.voted_for.data == -1 {
+            self.voted_for
+                .write(candidate_id, &mut self.state_file)
+                .await?;
+            Ok(true)
+        } else {
+            Ok(self.voted_for.data == candidate_id)
+        }
     }
 }
 

@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs::File;
 use std::net::SocketAddr;
 use std::ops::{DerefMut, RangeInclusive};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -55,7 +57,14 @@ impl NodeClient<TokioFile> {
     ) -> Result<NodeClient<TokioFile>, Box<dyn std::error::Error>> {
         let mut config = Config::from_file(config_path)?;
 
-        let persistent_state_path = std::mem::take(&mut config.persistent_state_file);
+        let mut persistent_state_path = PathBuf::from(std::mem::take(&mut config.persistent_state_file));
+        let file_name_suffix = persistent_state_path
+            .file_name()
+            .ok_or("File name should be present in persistent_state_file")?
+            .to_str()
+            .ok_or("persistent_state_file should have valid unicode characters")?;
+        persistent_state_path.set_file_name(format!("node_{}_{}", node_index, file_name_suffix));
+
         let persistent_state_file = tokio::fs::OpenOptions::new()
             .write(true)
             .read(true)
@@ -150,7 +159,6 @@ impl NodeClient<TokioFile> {
     }
 
     fn restart_election_timer(&mut self) {
-        trace!("Restarting election timer");
         self.timer
             .as_mut()
             .reset(Instant::now() + self.election_timeout);
@@ -165,12 +173,7 @@ impl NodeClient<TokioFile> {
                 // trace!("Timer expired, current role is {:?}", self.role);
                 match &self.role {
                     NodeRole::Follower => {
-                        // Election timer expired, convert to candidate and request votes
-                        // Drop previous RPCs, might be due to a split vote
-                        self.jobs = JoinSet::new();
-                        let candidate_state = state::VolatileCandidate{votes_received: 0};
-                        self.role = NodeRole::Candidate(candidate_state);
-                        self.request_votes().await;
+                        self.become_candidate().await?;
                     }
                     NodeRole::Candidate(_) => {}
                     NodeRole::Leader(_) => {}
@@ -286,14 +289,27 @@ impl NodeClient<TokioFile> {
         });
     }
 
-    async fn request_votes(&mut self) {
-        trace!("Requesting votes from all peers");
+    async fn become_candidate(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // convert to candidate and request votes.
+        // Drop previous RPCs, might be due to a split vote
+        trace!("Becoming candidate");
+        self.jobs.shutdown().await;
+        let candidate_state = state::VolatileCandidate { votes_received: 0 };
+        self.role = NodeRole::Candidate(candidate_state);
+
+        self.node_common
+            .persistent_state
+            .lock()
+            .await
+            .increment_current_term_and_vote(self.node_common.node_index as i32)
+            .await?;
 
         // FIXME: Don't make this vec. Need to fix borrow checker issues
         let peer_ids: Vec<usize> = self.peers.iter().map(|(id, _)| *id).collect();
         for peer_id in peer_ids.into_iter() {
             self.request_vote(peer_id).await;
         }
+        Ok(())
     }
 
     async fn send_heartbeat(&mut self) {
