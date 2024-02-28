@@ -1,8 +1,4 @@
-use std::{
-    collections::HashMap,
-    pin::Pin,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, pin::Pin, sync::Arc};
 
 use rand::distributions::Uniform;
 use rand::rngs::SmallRng;
@@ -41,7 +37,7 @@ enum TaskResult {
 }
 
 pub struct NodeCommon<SFile: StateFile> {
-    persistent_state: state::Persistent<SFile>,
+    persistent_state: tokio::sync::Mutex<state::Persistent<SFile>>,
     node_index: u32,
 }
 

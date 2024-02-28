@@ -71,7 +71,9 @@ impl NodeClient<TokioFile> {
         let timer = Box::pin(tokio::time::sleep(election_timeout));
 
         let node_common = Arc::new(NodeCommon {
-            persistent_state: state::Persistent::new(persistent_state_file).await?,
+            persistent_state: tokio::sync::Mutex::new(
+                state::Persistent::new(persistent_state_file).await?,
+            ),
             node_index,
         });
 
@@ -194,10 +196,13 @@ impl NodeClient<TokioFile> {
                             } else {
                                 warn!("Received vote response from peer, however current role is not candidate");
                             }
-                        } else if vote_response.term > self.node_common.persistent_state.current_term() {
-                            // Our term was stale, update it and abort all RPCs
-                            self.node_common.persistent_state.update_current_term(vote_response.term).await?;
-                            self.jobs.shutdown().await;
+                        } else {
+                            let mut persistent_state = self.node_common.persistent_state.lock().await;
+                            if vote_response.term > persistent_state.current_term() {
+                                // Our term was stale, update it and abort all RPCs
+                                persistent_state.update_current_term(vote_response.term).await?;
+                                self.jobs.shutdown().await;
+                            }
                         }
                     }
                     Ok(TaskResult::VoteFail(peer_id)) => {
@@ -254,7 +259,12 @@ impl NodeClient<TokioFile> {
         let mut rpc_client = peer.rpc_client.clone();
 
         let request_votes_request = pb::VoteRequest {
-            term: self.node_common.persistent_state.current_term(),
+            term: self
+                .node_common
+                .persistent_state
+                .lock()
+                .await
+                .current_term(),
             candidate_id: self.node_common.node_index,
             last_log_index: 0, // TODO
             last_log_term: 0,
@@ -290,7 +300,12 @@ impl NodeClient<TokioFile> {
         trace!("Sending heartbeat to all peers");
 
         let append_entries_request = pb::AppendEntriesRequest {
-            term: self.node_common.persistent_state.current_term(),
+            term: self
+                .node_common
+                .persistent_state
+                .lock()
+                .await
+                .current_term(),
             leader_id: self.node_common.node_index,
             prev_log_index: 0, // FIXME
             prev_log_term: 0,  // FIXME

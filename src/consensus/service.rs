@@ -24,7 +24,12 @@ impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
         trace!("request_vote called");
 
         let vote_response = VoteResponse {
-            term: self.node_common.persistent_state.current_term(),
+            term: self
+                .node_common
+                .persistent_state
+                .lock()
+                .await
+                .current_term(),
             vote_granted: true,
         };
         Ok(Response::new(vote_response))

@@ -1,9 +1,9 @@
-use std::{fmt::Debug, io::SeekFrom, sync::atomic::Ordering};
+use std::{fmt::Debug, io::SeekFrom};
 
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tracing::trace;
 
-use super::macro_util::{Atomic, Atomize, GenericByteIO};
+use super::macro_util::GenericByteIO;
 
 /// This State is updated on stable storage before responding to RPCs
 pub struct Persistent<StateFile: super::StateFile> {
@@ -14,7 +14,7 @@ pub struct Persistent<StateFile: super::StateFile> {
     /// logbook, vector of (message, term); all logs might not be applied
     // log: Vec<(Message, u32)>,
     /// file like object that will interact with storage to read/write persistent state
-    state_file: tokio::sync::Mutex<StateFile>,
+    state_file: StateFile,
 }
 
 /// Volatile state that is stored on all servers
@@ -77,9 +77,9 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
             state_file.write_u32_le(STATE_FILE_VERSION).await?;
 
             current_term = FileData::from_state_file_write(0, &mut state_file).await?;
-            state_file.write_u32_le(current_term.get_data()).await?;
+            state_file.write_u32_le(current_term.data).await?;
             voted_for = FileData::from_state_file_write(-1, &mut state_file).await?;
-            state_file.write_i32_le(voted_for.get_data()).await?;
+            state_file.write_i32_le(voted_for.data).await?;
             operation_performed = "write";
         } else {
             let version = state_file.read_u32_le().await?;
@@ -103,17 +103,17 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
             current_term,
             voted_for,
             // log: vec![],
-            state_file: tokio::sync::Mutex::new(state_file),
+            state_file,
         })
     }
     pub fn current_term(&self) -> u32 {
-        self.current_term.get_data()
+        self.current_term.data
     }
     pub async fn update_current_term(
-        &self,
+        &mut self,
         new_term: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        self.current_term.write(new_term, &self.state_file).await?;
+        self.current_term.write(new_term, &mut self.state_file).await?;
         Ok(())
     }
 }
@@ -139,15 +139,15 @@ impl VolatileCommon {
 #[derive(Debug)]
 struct FileData<T>
 where
-    T: Debug + Copy + Atomize,
+    T: Debug + Copy,
 {
     position: SeekFrom,
-    data: Atomic<T>,
+    data: T,
 }
 
 impl<T> FileData<T>
 where
-    T: Copy + Debug + Atomize,
+    T: Copy + Debug,
 {
     /// Construct FileData from given data by writing to the file at current offset
     async fn from_state_file_write<StateFile>(
@@ -161,7 +161,7 @@ where
         state_file.write_little_endian(data).await?;
         Ok(Self {
             position: SeekFrom::Start(position_from_start),
-            data: Atomic::from(data),
+            data,
         })
     }
 
@@ -176,28 +176,23 @@ where
         let data = state_file.read_little_endian().await?;
         Ok(Self {
             position: SeekFrom::Start(position_from_start),
-            data: Atomic::from(data),
+            data,
         })
     }
 
-    fn get_data(&self) -> T {
-        self.data.load(Ordering::SeqCst)
-    }
-
     async fn write<StateFile>(
-        &self,
+        &mut self,
         data: T,
-        state_file_mutex: &tokio::sync::Mutex<StateFile>,
+        state_file: &mut StateFile,
     ) -> Result<(), Box<dyn std::error::Error>>
     where
         StateFile: super::StateFile + GenericByteIO<T>,
     {
-        let mut state_file = state_file_mutex.lock().await;
         let current_position = state_file.stream_position().await?;
         state_file.seek(self.position).await?;
         state_file.write_little_endian(data).await?;
         state_file.flush().await?; // Be really sure this value is written to disk
-        self.data.store(data, Ordering::SeqCst);
+        self.data = data;
         state_file.seek(SeekFrom::Start(current_position)).await?;
         Ok(())
     }
