@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use std::fs::File;
 use std::net::SocketAddr;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
@@ -40,21 +39,20 @@ struct Config {
 }
 
 impl Config {
-    fn from_file(path: &str) -> Result<Config, Box<dyn std::error::Error>> {
-        let config_file = File::open(path)?;
+    fn from_reader<Reader: std::io::Read>(config_file: Reader) -> Result<Config, Box<dyn std::error::Error>> {
         let config: Config = ron::de::from_reader(config_file)?;
-        trace!("Parsed config from file {path}: \n{:#?}", config);
+        trace!("Parsed config from reader: \n{:#?}", config);
         Ok(config)
     }
 }
 
 impl NodeClient<TokioFile> {
-    #[tracing::instrument]
-    pub async fn new(
-        config_path: &str,
+    #[tracing::instrument(skip(config_file))]
+    pub async fn new<Reader: std::io::Read>(
+        config_file: Reader,
         node_index: u32,
     ) -> Result<NodeClient<TokioFile>, Box<dyn std::error::Error>> {
-        let mut config = Config::from_file(config_path)?;
+        let mut config = Config::from_reader(config_file)?;
 
         let mut persistent_state_path =
             PathBuf::from(std::mem::take(&mut config.persistent_state_file));

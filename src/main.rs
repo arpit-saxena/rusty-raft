@@ -1,4 +1,4 @@
-use std::process::exit;
+use std::{fs::File, process::exit};
 
 use clap::Parser;
 use raft::consensus::NodeClient;
@@ -15,7 +15,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
     let config_path = "config.ron";
-    let mut raft_node = match NodeClient::new(config_path, cli.node_id).await {
+    let config_file = File::open(config_path)?;
+    let mut raft_node = match NodeClient::new(config_file, cli.node_id).await {
         Err(e) => {
             eprintln!(
                 "Error in creating node using config path '{config_path}': {:#?}",
