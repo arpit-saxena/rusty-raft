@@ -8,7 +8,6 @@ use tokio::{
     time::{Duration, Instant, Sleep},
 };
 use tonic::transport::{Channel, Uri};
-use tracing::info;
 
 mod pb {
     tonic::include_proto!("raft");
@@ -78,8 +77,4 @@ pub struct PeerNode {
     /// Only used by leaders, true if a heartbeat is pending that will be retried
     /// This will ensure we don't queue up more heartbeats than necessary
     pending_heartbeat: bool,
-}
-
-pub fn hello() {
-    info!("Hello hello");
 }

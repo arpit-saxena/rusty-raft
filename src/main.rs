@@ -2,7 +2,6 @@ use std::process::exit;
 
 use clap::Parser;
 use raft::consensus::NodeClient;
-use raft::log_stuffs;
 
 #[derive(Parser)]
 struct Cli {
@@ -14,8 +13,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     tracing_subscriber::fmt::init();
-
-    log_stuffs();
 
     let config_path = "config.ron";
     let mut raft_node = match NodeClient::new(config_path, cli.node_id).await {
