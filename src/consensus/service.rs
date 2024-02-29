@@ -8,6 +8,7 @@ use tracing::trace;
 
 #[tonic::async_trait]
 impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
+    #[tracing::instrument(skip_all, fields(id = self.node_common.node_index))]
     async fn append_entries(
         &self,
         _: Request<AppendEntriesRequest>,
@@ -32,6 +33,7 @@ impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
         Ok(Response::new(reply))
     }
 
+    #[tracing::instrument(skip_all, id = self.node_common.node_index)]
     async fn request_vote(
         &self,
         request: Request<VoteRequest>,

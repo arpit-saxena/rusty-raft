@@ -49,6 +49,7 @@ impl Config {
 }
 
 impl NodeClient<TokioFile> {
+    #[tracing::instrument]
     pub async fn new(
         config_path: &str,
         node_index: u32,
@@ -104,7 +105,7 @@ impl NodeClient<TokioFile> {
 
         trace!("Spawning server to listen on {}", listen_addr);
         let node_server = NodeServer {
-            node_common,
+            node_common: Arc::clone(&node_common),
             last_leader_message_time,
         };
         tokio::spawn(
@@ -116,6 +117,7 @@ impl NodeClient<TokioFile> {
         Ok(node)
     }
 
+    #[tracing::instrument]
     async fn peers_from_config(
         config: Config,
         node_index: usize,
@@ -141,7 +143,7 @@ impl NodeClient<TokioFile> {
                     .path_and_query("/")
                     .build()?;
                 trace!("Calling PeerNode constructor for index {idx}");
-                Ok(PeerNode::from_address(uri, idx))
+                Ok(PeerNode::from_address(uri, idx, node_index))
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -154,6 +156,7 @@ impl NodeClient<TokioFile> {
         Ok((peers, listen_addr))
     }
 
+    #[tracing::instrument(skip_all, fields(id = self.node_common.node_index))]
     fn set_new_election_timeout(&mut self) {
         let timeout = Duration::from_micros(
             (self.election_timer_distribution.sample(&mut self.rng) * 1000_f32).floor() as u64,
@@ -189,6 +192,7 @@ impl NodeClient<TokioFile> {
 
     /// Process the next event
     // TODO: Should this be async?
+    #[tracing::instrument(skip(self), fields(id = self.node_common.node_index))]
     pub async fn tick(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.update_election_timer();
         let timer = self.timer.as_mut();
@@ -271,6 +275,7 @@ impl NodeClient<TokioFile> {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self), fields(id = self.node_common.node_index))]
     async fn request_vote(&mut self, peer_id: usize) {
         let peer = self
             .peers
@@ -306,6 +311,7 @@ impl NodeClient<TokioFile> {
         });
     }
 
+    #[tracing::instrument(skip(self), fields(id = self.node_common.node_index))]
     async fn become_candidate(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // convert to candidate and request votes.
         // Drop previous RPCs, might be due to a split vote
@@ -329,6 +335,7 @@ impl NodeClient<TokioFile> {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self), fields(id = self.node_common.node_index))]
     async fn send_heartbeat(&mut self, peer_id: usize) {
         let peer = self
             .peers
@@ -370,7 +377,9 @@ impl NodeClient<TokioFile> {
         });
     }
 
+    #[tracing::instrument(skip(self), fields(id = self.node_common.node_index))]
     async fn retry_heartbeat(&mut self, peer_id: usize) {
+        trace!("Retrying heartbeat");
         if let Some(peer) = self.peers.get_mut(&peer_id) {
             peer.pending_heartbeat = false;
             self.send_heartbeat(peer_id).await;
@@ -379,6 +388,7 @@ impl NodeClient<TokioFile> {
         }
     }
 
+    #[tracing::instrument(skip(self), fields(id = self.node_common.node_index))]
     async fn send_heartbeats(&mut self) {
         trace!("Sending heartbeat to all peers");
 
@@ -391,11 +401,13 @@ impl NodeClient<TokioFile> {
 }
 
 impl PeerNode {
+    #[tracing::instrument(fields(id = node_id))]
     async fn from_address(
         address: Uri,
-        node_index: usize,
+        peer_id: usize,
+        node_id: usize,
     ) -> Result<PeerNode, Box<dyn std::error::Error>> {
-        trace!("Creating peer node with index {node_index} to address {address}");
+        trace!("Creating peer node with index {peer_id} to address {address}");
 
         let endpoint = Endpoint::new(address.clone())?;
         let channel = endpoint.connect_lazy();
@@ -403,7 +415,7 @@ impl PeerNode {
         let peer_node: PeerNode = PeerNode {
             _address: address,
             rpc_client,
-            node_index,
+            node_index: peer_id,
             pending_heartbeat: false,
         };
         Ok(peer_node)
