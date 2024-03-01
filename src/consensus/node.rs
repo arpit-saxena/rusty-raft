@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use std::net::SocketAddr;
 use std::ops::RangeInclusive;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use std::sync::Arc;
 
@@ -29,13 +29,13 @@ use tracing::{debug, error, info, trace, warn};
 
 /// Configuration for Raft Consensus, can be read from any file, currently only RON is supported
 #[serde_with::serde_as]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
-    persistent_state_file: String,
-    cluster_members: Vec<String>, // vector of Uri's
-    election_timeout_interval: RangeInclusive<f32>,
+    pub persistent_state_file: Box<Path>,
+    pub cluster_members: Vec<String>, // vector of Uri's
+    pub election_timeout_interval: RangeInclusive<f32>,
     #[serde_as(as = "serde_with::DurationMilliSeconds")]
-    heartbeat_interval: Duration,
+    pub heartbeat_interval: Duration,
 }
 
 impl Config {
@@ -60,11 +60,10 @@ impl NodeClient<TokioFile> {
 
     #[tracing::instrument]
     pub async fn from_config(
-        mut config: Config,
+        config: Config,
         node_index: u32,
     ) -> Result<NodeClient<TokioFile>, Box<dyn std::error::Error>> {
-        let mut persistent_state_path =
-            PathBuf::from(std::mem::take(&mut config.persistent_state_file));
+        let mut persistent_state_path = PathBuf::from(config.persistent_state_file.clone());
         let file_name_suffix = persistent_state_path
             .file_name()
             .ok_or("File name should be present in persistent_state_file")?
@@ -149,7 +148,6 @@ impl NodeClient<TokioFile> {
                     .authority(uri_str)
                     .path_and_query("/")
                     .build()?;
-                trace!("Calling PeerNode constructor for index {idx}");
                 Ok(PeerNode::from_address(uri, idx, node_index))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -414,7 +412,7 @@ impl PeerNode {
         peer_id: usize,
         node_id: usize,
     ) -> Result<PeerNode, Box<dyn std::error::Error>> {
-        trace!("Creating peer node with index {peer_id} to address {address}");
+        // trace!("Creating peer node with index {peer_id} to address {address}");
 
         let endpoint = Endpoint::new(address.clone())?;
         let channel = endpoint.connect_lazy();

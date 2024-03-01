@@ -11,6 +11,7 @@ enum CliMode {
     },
     Cluster {
         config_path: Box<Path>,
+        num_nodes: u16,
     },
 }
 
@@ -33,7 +34,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             run_node(node_id, config_path).await?;
         }
-        CliMode::Cluster { config_path } => run_cluster(config_path).await?,
+        CliMode::Cluster {
+            config_path,
+            num_nodes,
+        } => run_cluster(config_path, num_nodes).await?,
     }
 
     Ok(())
@@ -58,8 +62,12 @@ async fn run_node(node_id: u32, config_path: Box<Path>) -> Result<(), Box<dyn st
     }
 }
 
-async fn run_cluster(config_path: Box<Path>) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_cluster(
+    config_path: Box<Path>,
+    num_nodes: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
     let config_file = File::open(config_path.clone())?;
-    let _ = Cluster::from_reader(config_file)?;
+    let mut cluster = Cluster::from_reader(config_file, num_nodes).await?;
+    cluster.join_all().await?;
     Ok(())
 }
