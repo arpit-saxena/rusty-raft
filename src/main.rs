@@ -63,10 +63,7 @@ async fn run_node(node_id: u32, config_path: Box<Path>) -> Result<()> {
     }
 }
 
-async fn run_cluster(
-    config_path: Box<Path>,
-    num_nodes: u16,
-) -> Result<()> {
+async fn run_cluster(config_path: Box<Path>, num_nodes: u16) -> Result<()> {
     let config_file = File::open(config_path.clone())?;
     let mut cluster = Cluster::from_reader(config_file, num_nodes).await?;
     cluster.join_all().await?;

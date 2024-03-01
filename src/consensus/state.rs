@@ -59,8 +59,13 @@ pub enum StateError {
     #[error("Given state file's initial bytes don't match magic bytes")]
     MagicBytesNotMatching,
 
-    #[error("State File version {file_version} is more than supported version {supported_version}")]
-    VersionNotSupported{file_version: u32, supported_version: u32},
+    #[error(
+        "State File version {file_version} is more than supported version {supported_version}"
+    )]
+    VersionNotSupported {
+        file_version: u32,
+        supported_version: u32,
+    },
 
     #[error(transparent)]
     IOError(#[from] std::io::Error),
@@ -88,9 +93,7 @@ impl LogEntry {
         })
     }
 
-    async fn from_read<StateFile>(
-        state_file: &mut StateFile,
-    ) -> Result<LogEntry, StateError>
+    async fn from_read<StateFile>(state_file: &mut StateFile) -> Result<LogEntry, StateError>
     where
         StateFile: super::StateFile,
     {
@@ -149,7 +152,10 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
         } else {
             let version = state_file.read_u32_le().await?;
             if version > STATE_FILE_VERSION {
-                return Err(StateError::VersionNotSupported { file_version: version, supported_version: STATE_FILE_VERSION });
+                return Err(StateError::VersionNotSupported {
+                    file_version: version,
+                    supported_version: STATE_FILE_VERSION,
+                });
             }
             current_term = FileData::from_state_file_read(&mut state_file).await?;
             voted_for = FileData::from_state_file_read(&mut state_file).await?;
@@ -178,7 +184,12 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
         let mut log = Vec::new();
         // FIXME: Assuming if error is returned, we have reached EOF, however there can be other errors as well
         while let Ok(log_entry) = LogEntry::from_read(state_file).await {
-            trace!("Read log entry: index = {}, term = {}, length = {}", log_entry.index.data, log_entry.term.data, log_entry.length.data);
+            trace!(
+                "Read log entry: index = {}, term = {}, length = {}",
+                log_entry.index.data,
+                log_entry.term.data,
+                log_entry.length.data
+            );
             log.push(log_entry);
         }
         Ok(log)
@@ -187,10 +198,7 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
     pub fn current_term(&self) -> u32 {
         self.current_term.data
     }
-    pub async fn update_current_term(
-        &mut self,
-        new_term: u32,
-    ) -> Result<(), StateError> {
+    pub async fn update_current_term(&mut self, new_term: u32) -> Result<(), StateError> {
         // Only update if new term is different from old term.
         if self.current_term.data == new_term {
             return Ok(());
@@ -218,10 +226,7 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
         );
         Ok(())
     }
-    pub async fn grant_vote_if_possible(
-        &mut self,
-        candidate_id: u32,
-    ) -> Result<bool, StateError> {
+    pub async fn grant_vote_if_possible(&mut self, candidate_id: u32) -> Result<bool, StateError> {
         let candidate_id = candidate_id as i32;
         if self.voted_for.data == -1 {
             self.voted_for
@@ -300,9 +305,7 @@ where
     }
 
     /// Construct FileData by reading data from the file at current offset
-    async fn from_state_file_read<StateFile>(
-        state_file: &mut StateFile,
-    ) -> Result<Self, StateError>
+    async fn from_state_file_read<StateFile>(state_file: &mut StateFile) -> Result<Self, StateError>
     where
         StateFile: super::StateFile + GenericByteIO<T>,
     {

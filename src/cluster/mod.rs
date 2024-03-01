@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+use thiserror::Error;
 use tokio::task::{JoinError, JoinSet};
 use tracing::trace;
 
@@ -27,9 +28,18 @@ const fn default_port_range_start() -> u16 {
     54000
 }
 
+#[derive(Error, Debug)]
+pub enum ClusterError {
+    #[error("Node {node_id} crashed")]
+    NodeCrash { node_id: u32, source: anyhow::Error },
+
+    #[error(transparent)]
+    JoinError(#[from] JoinError),
+}
+
 pub struct Cluster {
     _node_config: NodeConfig,
-    jobs: JoinSet<()>,
+    jobs: JoinSet<Result<(), ClusterError>>,
 }
 
 impl Cluster {
@@ -64,7 +74,10 @@ impl Cluster {
         for mut node in nodes.into_iter() {
             jobs.spawn(async move {
                 loop {
-                    node.tick().await.unwrap()
+                    node.tick().await.map_err(|e| ClusterError::NodeCrash {
+                        node_id: node.id(),
+                        source: e,
+                    })?;
                 }
             });
         }
@@ -76,9 +89,16 @@ impl Cluster {
         Ok(cluster)
     }
 
-    pub async fn join_all(&mut self) -> Result<(), JoinError> {
+    pub async fn join_all(&mut self) -> Result<(), ClusterError> {
         while let Some(res) = self.jobs.join_next().await {
-            res?
+            match res {
+                Err(e) => {
+                    return Err(ClusterError::JoinError(e));
+                }
+                Ok(res) => {
+                    res?;
+                }
+            }
         }
         Ok(())
     }
