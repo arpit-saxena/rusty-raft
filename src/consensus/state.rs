@@ -245,6 +245,35 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
         self.log.push(log_entry);
         Ok(())
     }
+    pub fn has_matching_entry(&self, index: u64, term: u32) -> bool {
+        // index and term both being 0 implies null entry (present in empty list)
+        if index == 0 && term == 0 {
+            return true;
+        }
+
+        // INVARIANT: Every entry left has index less than current entry's index and
+        // term less than or equal to the current entry's term
+        for entry in self.log.iter().rev() {
+            if entry.index.data < index {
+                return false;
+            }
+            if entry.index.data > index {
+                continue;
+            }
+            // => entry.index.data == index
+
+            if entry.term.data < term {
+                return false;
+            }
+            if entry.term.data > term {
+                continue;
+            }
+            // => entry.term.data == term
+
+            return true;
+        }
+        false
+    }
     pub fn last_log_index(&self) -> u64 {
         self.log.last().map(|entry| entry.index.data).unwrap_or(0)
     }
