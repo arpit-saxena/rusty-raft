@@ -30,7 +30,7 @@ use tracing::{debug, error, info, trace, warn};
 /// Configuration for Raft Consensus, can be read from any file, currently only RON is supported
 #[serde_with::serde_as]
 #[derive(Debug, Serialize, Deserialize)]
-struct Config {
+pub struct Config {
     persistent_state_file: String,
     cluster_members: Vec<String>, // vector of Uri's
     election_timeout_interval: RangeInclusive<f32>,
@@ -39,7 +39,9 @@ struct Config {
 }
 
 impl Config {
-    fn from_reader<Reader: std::io::Read>(config_file: Reader) -> Result<Config, Box<dyn std::error::Error>> {
+    pub fn from_reader<Reader: std::io::Read>(
+        config_file: Reader,
+    ) -> Result<Config, Box<dyn std::error::Error>> {
         let config: Config = ron::de::from_reader(config_file)?;
         trace!("Parsed config from reader: \n{:#?}", config);
         Ok(config)
@@ -48,12 +50,19 @@ impl Config {
 
 impl NodeClient<TokioFile> {
     #[tracing::instrument(skip(config_file))]
-    pub async fn new<Reader: std::io::Read>(
+    pub async fn from_config_reader<Reader: std::io::Read>(
         config_file: Reader,
         node_index: u32,
     ) -> Result<NodeClient<TokioFile>, Box<dyn std::error::Error>> {
-        let mut config = Config::from_reader(config_file)?;
+        let config = Config::from_reader(config_file)?;
+        NodeClient::from_config(config, node_index).await
+    }
 
+    #[tracing::instrument]
+    pub async fn from_config(
+        mut config: Config,
+        node_index: u32,
+    ) -> Result<NodeClient<TokioFile>, Box<dyn std::error::Error>> {
         let mut persistent_state_path =
             PathBuf::from(std::mem::take(&mut config.persistent_state_file));
         let file_name_suffix = persistent_state_path

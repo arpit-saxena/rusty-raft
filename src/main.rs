@@ -1,7 +1,7 @@
 use std::{fs::File, path::Path, process::exit};
 
 use clap::{Parser, Subcommand};
-use raft::consensus::NodeClient;
+use raft::{cluster::Cluster, consensus::NodeClient};
 
 #[derive(Debug, Subcommand)]
 enum CliMode {
@@ -27,12 +27,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
     match cli.mode {
-        CliMode::Node{config_path, node_id} => {
+        CliMode::Node {
+            config_path,
+            node_id,
+        } => {
             run_node(node_id, config_path).await?;
         }
-        CliMode::Cluster { config_path: _ } => {
-            todo!();
-        }
+        CliMode::Cluster { config_path } => run_cluster(config_path).await?,
     }
 
     Ok(())
@@ -40,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run_node(node_id: u32, config_path: Box<Path>) -> Result<(), Box<dyn std::error::Error>> {
     let config_file = File::open(config_path.clone())?;
-    let mut raft_node = match NodeClient::new(config_file, node_id).await {
+    let mut raft_node = match NodeClient::from_config_reader(config_file, node_id).await {
         Err(e) => {
             eprintln!(
                 "Error in creating node using config path '{:?}': {:#?}",
@@ -55,4 +56,10 @@ async fn run_node(node_id: u32, config_path: Box<Path>) -> Result<(), Box<dyn st
         // trace!("Ticking RaftNode");
         raft_node.tick().await?;
     }
+}
+
+async fn run_cluster(config_path: Box<Path>) -> Result<(), Box<dyn std::error::Error>> {
+    let config_file = File::open(config_path.clone())?;
+    let _ = Cluster::from_reader(config_file)?;
+    Ok(())
 }

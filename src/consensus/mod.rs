@@ -17,6 +17,7 @@ mod macro_util;
 mod node;
 mod service;
 mod state;
+pub use node::Config;
 use pb::raft_client::RaftClient;
 
 pub trait StateFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + 'static + Unpin {}
