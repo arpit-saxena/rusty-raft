@@ -5,14 +5,20 @@ use tracing::trace;
 
 use super::{macro_util::GenericByteIO, PeerNode};
 
+struct LogEntry {
+    index: FileData<u64>,
+    term: FileData<u32>,
+    length: FileData<u64>,
+}
+
 /// This State is updated on stable storage before responding to RPCs
 pub struct Persistent<StateFile: super::StateFile> {
     /// latest term server has seen (initialized to 0 on first boot, increases monotonically)
     current_term: FileData<u32>,
     /// candidateId that received vote in current term (or -1 if not voted)
     voted_for: FileData<i32>, // TODO: Maybe store reference to PeerNode?
-    /// logbook, vector of (message, term); all logs might not be applied
-    // log: Vec<(Message, u32)>,
+    /// logbook, vector of LogEntry; all logs might not be applied
+    log: Vec<LogEntry>,
     /// file like object that will interact with storage to read/write persistent state
     state_file: StateFile,
 }
@@ -47,6 +53,48 @@ pub struct VolatileCandidate {
 const STATE_MAGIC_BYTES: u64 = 0x6d3d5b9932220a79;
 const STATE_FILE_VERSION: u32 = 1;
 
+impl LogEntry {
+    async fn from_write<StateFile>(
+        index: u64,
+        term: u32,
+        log: &[u8],
+        state_file: &mut StateFile,
+    ) -> Result<LogEntry, Box<dyn std::error::Error>>
+    where
+        StateFile: super::StateFile,
+    {
+        let index = FileData::from_state_file_write(index, state_file).await?;
+        let term = FileData::from_state_file_write(term, state_file).await?;
+        let length = FileData::from_state_file_write(log.len() as u64, state_file).await?;
+        state_file.write_all(log).await?;
+        state_file.flush().await?; // Make sure the log is flushed to the disk
+        Ok(LogEntry {
+            index,
+            term,
+            length,
+        })
+    }
+
+    async fn from_read<StateFile>(
+        state_file: &mut StateFile,
+    ) -> Result<LogEntry, Box<dyn std::error::Error>>
+    where
+        StateFile: super::StateFile,
+    {
+        let index = FileData::from_state_file_read(state_file).await?;
+        let term = FileData::from_state_file_read(state_file).await?;
+        let length = FileData::from_state_file_read(state_file).await?;
+        state_file
+            .seek(SeekFrom::Current(length.data as i64))
+            .await?;
+        Ok(LogEntry {
+            index,
+            term,
+            length,
+        })
+    }
+}
+
 impl<StateFile: super::StateFile> Persistent<StateFile> {
     pub async fn new(mut state_file: StateFile) -> Result<Self, Box<dyn std::error::Error>> {
         let magic_bytes_present = match state_file.read_u64_le().await {
@@ -72,6 +120,7 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
         let current_term;
         let voted_for;
         let operation_performed;
+        let log;
         if !magic_bytes_present {
             state_file.write_u64_le(STATE_MAGIC_BYTES).await?;
             state_file.write_u32_le(STATE_FILE_VERSION).await?;
@@ -80,7 +129,9 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
             state_file.write_u32_le(current_term.data).await?;
             voted_for = FileData::from_state_file_write(-1, &mut state_file).await?;
             state_file.write_i32_le(voted_for.data).await?;
+            log = vec![];
             operation_performed = "write";
+            // TODO: Write an end marker
         } else {
             let version = state_file.read_u32_le().await?;
             if version > STATE_FILE_VERSION {
@@ -88,24 +139,37 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
             }
             current_term = FileData::from_state_file_read(&mut state_file).await?;
             voted_for = FileData::from_state_file_read(&mut state_file).await?;
+            log = Self::read_log(&mut state_file).await?;
             operation_performed = "read";
         }
 
         trace!(
-            "Performed {} operation version = {}, current_term = {:?}, voted_for = {:?} to state file",
+            "Performed {} operation version = {}, current_term = {:?}, voted_for = {:?}, logs length = {}, to state file",
             operation_performed,
             STATE_FILE_VERSION,
             current_term,
             voted_for,
+            log.len(),
         );
 
         Ok(Persistent {
             current_term,
             voted_for,
-            // log: vec![],
+            log,
             state_file,
         })
     }
+
+    async fn read_log(state_file: &mut StateFile) -> Result<Vec<LogEntry>, Box<dyn std::error::Error>> {
+        let mut log = Vec::new();
+        // FIXME: Assuming if error is returned, we have reached EOF, however there can be other errors as well
+        while let Ok(log_entry) = LogEntry::from_read(state_file).await {
+            trace!("Read log entry: index = {}, term = {}, length = {}", log_entry.index.data, log_entry.term.data, log_entry.length.data);
+            log.push(log_entry);
+        }
+        Ok(log)
+    }
+
     pub fn current_term(&self) -> u32 {
         self.current_term.data
     }
@@ -153,6 +217,14 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
         } else {
             Ok(self.voted_for.data == candidate_id)
         }
+    }
+    pub async fn add_log(&mut self, message: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        let log_index = self.log.last().map(|record| record.index.data).unwrap_or(0) + 1;
+        let term = self.current_term();
+        let log_entry =
+            LogEntry::from_write(log_index, term, message, &mut self.state_file).await?;
+        self.log.push(log_entry);
+        Ok(())
     }
 }
 

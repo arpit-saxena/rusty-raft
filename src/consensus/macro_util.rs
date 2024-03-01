@@ -26,3 +26,4 @@ macro_rules! impl_byte_writer {
 
 impl_byte_writer!(u32, read_u32_le, write_u32_le);
 impl_byte_writer!(i32, read_i32_le, write_i32_le);
+impl_byte_writer!(u64, read_u64_le, write_u64_le);
