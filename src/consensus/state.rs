@@ -245,6 +245,12 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
         self.log.push(log_entry);
         Ok(())
     }
+    pub fn last_log_index(&self) -> u64 {
+        self.log.last().map(|entry| entry.index.data).unwrap_or(0)
+    }
+    pub fn last_log_term(&self) -> u32 {
+        self.log.last().map(|entry| entry.term.data).unwrap_or(0)
+    }
 }
 
 impl VolatileFollowerState {

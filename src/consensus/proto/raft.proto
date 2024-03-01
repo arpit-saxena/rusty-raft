@@ -15,9 +15,11 @@ message AppendEntriesRequest {
   uint64 prev_log_index = 3;
   // term of prevLogIndex entry
   uint32 prev_log_term = 4;
-  // TODO: Add entries variable
+  // log entries to store (empty for heartbeat; may send more 
+  // than one for efficiency)
+  repeated bytes entries = 5;
   // leader's commitIndex
-  uint64 leader_commit = 5;
+  uint64 leader_commit = 6;
 }
 
 message AppendEntriesResponse {

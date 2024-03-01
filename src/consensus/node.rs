@@ -375,6 +375,11 @@ impl NodeClient<TokioFile> {
             return;
         }
 
+        let persistent_state = self.node_common.persistent_state.lock().await;
+        let prev_log_index = persistent_state.last_log_index();
+        let prev_log_term = persistent_state.last_log_term();
+        std::mem::drop(persistent_state);
+
         let append_entries_request = pb::AppendEntriesRequest {
             term: self
                 .node_common
@@ -383,8 +388,9 @@ impl NodeClient<TokioFile> {
                 .await
                 .current_term(),
             leader_id: self.node_common.node_index,
-            prev_log_index: 0, // FIXME
-            prev_log_term: 0,  // FIXME
+            prev_log_index,
+            prev_log_term,
+            entries: vec![],
             leader_commit: self.common_volatile_state.commit_index,
         };
 
