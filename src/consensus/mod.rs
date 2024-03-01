@@ -42,13 +42,13 @@ enum TaskResult {
 pub struct NodeCommon<SFile: StateFile> {
     persistent_state: tokio::sync::Mutex<state::Persistent<SFile>>,
     node_index: u32,
+    role: tokio::sync::Mutex<NodeRole>,
 }
 
 /// Raft Node with members used for establishing consensus
 pub struct NodeClient<SFile: StateFile> {
     node_common: Arc<NodeCommon<SFile>>,
     common_volatile_state: state::VolatileCommon,
-    role: NodeRole,
 
     election_timeout: Duration,
     election_timer_distribution: Uniform<f32>,

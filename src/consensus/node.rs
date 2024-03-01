@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use std::net::SocketAddr;
-use std::ops::RangeInclusive;
+use std::ops::{Deref, DerefMut, RangeInclusive};
 use std::path::{Path, PathBuf};
 
 use std::sync::Arc;
@@ -104,13 +104,13 @@ impl NodeClient<TokioFile> {
                     })?,
             ),
             node_index,
+            role: tokio::sync::Mutex::new(NodeRole::Follower),
         });
 
         let last_leader_message_time = Arc::new(std::sync::Mutex::new(Instant::now()));
         let mut node = NodeClient {
             node_common: Arc::clone(&node_common),
             common_volatile_state: state::VolatileCommon::new(),
-            role: NodeRole::Follower,
             election_timeout,
             election_timer_distribution: distribution,
             heartbeat_interval,
@@ -121,7 +121,7 @@ impl NodeClient<TokioFile> {
             jobs: JoinSet::new(),
         };
         node.set_new_election_timeout();
-        node.update_election_timer();
+        node.update_election_timer().await;
 
         trace!("Spawning server to listen on {}", listen_addr);
         let node_server = NodeServer {
@@ -188,23 +188,23 @@ impl NodeClient<TokioFile> {
         self.election_timeout = timeout;
     }
 
-    fn update_election_timer(&mut self) {
-        match &self.role {
+    async fn update_election_timer(&mut self) {
+        match *self.node_common.role.lock().await {
             NodeRole::Leader(_) => {}
             _ => {
-                self.timer
-                    .as_mut()
-                    .reset(*self.last_leader_message_time.lock().unwrap() + self.election_timeout);
+                self.timer.as_mut().reset(
+                    *self.last_leader_message_time.lock().unwrap() + self.election_timeout,
+                );
             }
         }
     }
 
-    fn reset_and_update_election_timer(&mut self) {
+    async fn reset_and_update_election_timer(&mut self) {
         {
             let mut last_leader_message_time = self.last_leader_message_time.lock().unwrap();
             *last_leader_message_time = Instant::now();
         }
-        self.update_election_timer();
+        self.update_election_timer().await;
     }
 
     fn restart_heartbeat_timer(&mut self) {
@@ -217,24 +217,28 @@ impl NodeClient<TokioFile> {
     // TODO: Should this be async?
     #[tracing::instrument(skip(self), fields(id = self.node_common.node_index))]
     pub async fn tick(&mut self) -> Result<()> {
-        self.update_election_timer();
+        self.update_election_timer().await;
         let timer = self.timer.as_mut();
         tokio::select! {
             () = timer => {
                 // Update election timer again. If it has elapsed then do election stuff
-                self.update_election_timer();
+                self.update_election_timer().await;
                 if self.timer.is_elapsed() {
-                    match &self.role {
+                    let role = self.node_common.role.lock().await;
+                    match role.deref() {
                         NodeRole::Follower => {
-                            self.reset_and_update_election_timer();
+                            std::mem::drop(role);
+                            self.reset_and_update_election_timer().await;
                             self.become_candidate().await?;
                         }
                         NodeRole::Candidate(_) => {
+                            std::mem::drop(role);
                             // in case of a split vote, the election timer may expire when we're still a candidate
-                            self.reset_and_update_election_timer();
+                            self.reset_and_update_election_timer().await;
                             self.become_candidate().await?;
                         }
                         NodeRole::Leader(_) => {
+                            std::mem::drop(role);
                             self.restart_heartbeat_timer();
                             self.send_heartbeats().await;
                         }
@@ -253,11 +257,13 @@ impl NodeClient<TokioFile> {
                     Ok(TaskResult::VoteResponse(vote_response)) => {
                         if vote_response.vote_granted {
                             trace!("Received vote");
-                            if let NodeRole::Candidate(candidate_state) = &mut self.role {
+                            let mut role = self.node_common.role.lock().await;
+                            if let NodeRole::Candidate(candidate_state) = role.deref_mut() {
                                 candidate_state.votes_received += 1;
                                 if candidate_state.votes_received > (1 + self.peers.len()) / 2 {
                                     info!("Elected as leader woohoo");
-                                    self.role = NodeRole::Leader(state::VolatileLeader::new(&self.peers));
+                                    *role = NodeRole::Leader(state::VolatileLeader::new(&self.peers));
+                                    std::mem::drop(role);
                                     self.send_heartbeats().await;
                                     self.restart_heartbeat_timer();
                                 }
@@ -276,7 +282,7 @@ impl NodeClient<TokioFile> {
                         }
                     }
                     Ok(TaskResult::VoteFail(peer_id)) => {
-                        if let NodeRole::Candidate(_) = &self.role {
+                        if matches!(*self.node_common.role.lock().await, NodeRole::Candidate(_)) {
                             self.request_vote(peer_id).await;
                         }
                     }
@@ -285,7 +291,7 @@ impl NodeClient<TokioFile> {
                         self.peers.get_mut(&peer_id).unwrap().pending_heartbeat = false;
                     }
                     Ok(TaskResult::HeartbeatFail(peer_id)) => {
-                        if let NodeRole::Leader(_) = &self.role {
+                        if matches!(*self.node_common.role.lock().await, NodeRole::Leader(_)) {
                             self.retry_heartbeat(peer_id).await;
                         } else {
                             debug!("Had to retry heartbeat to {}, but not doing so since we're not leader anymore", peer_id);
@@ -341,7 +347,7 @@ impl NodeClient<TokioFile> {
         trace!("Becoming candidate");
         self.jobs.shutdown().await;
         let candidate_state = state::VolatileCandidate { votes_received: 0 };
-        self.role = NodeRole::Candidate(candidate_state);
+        *self.node_common.role.lock().await = NodeRole::Candidate(candidate_state);
 
         self.node_common
             .persistent_state
