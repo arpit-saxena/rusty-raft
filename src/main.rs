@@ -1,5 +1,6 @@
 use std::{fs::File, path::Path, process::exit};
 
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use raft::{cluster::Cluster, consensus::NodeClient};
 
@@ -22,7 +23,7 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     tracing_subscriber::fmt::init();
@@ -43,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn run_node(node_id: u32, config_path: Box<Path>) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_node(node_id: u32, config_path: Box<Path>) -> Result<()> {
     let config_file = File::open(config_path.clone())?;
     let mut raft_node = match NodeClient::from_config_reader(config_file, node_id).await {
         Err(e) => {
@@ -65,7 +66,7 @@ async fn run_node(node_id: u32, config_path: Box<Path>) -> Result<(), Box<dyn st
 async fn run_cluster(
     config_path: Box<Path>,
     num_nodes: u16,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let config_file = File::open(config_path.clone())?;
     let mut cluster = Cluster::from_reader(config_file, num_nodes).await?;
     cluster.join_all().await?;

@@ -1,3 +1,4 @@
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use std::{
@@ -36,7 +37,7 @@ impl Cluster {
     pub async fn from_reader<Reader: std::io::Read>(
         reader: Reader,
         num_nodes: u16,
-    ) -> Result<Cluster, Box<dyn std::error::Error>> {
+    ) -> Result<Cluster> {
         let config: ClusterConfig = ron::de::from_reader(reader)?;
         trace!("Parsed config {:?}", config);
 

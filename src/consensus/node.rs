@@ -10,6 +10,7 @@ use super::pb::raft_client::RaftClient;
 use super::pb::raft_server::RaftServer;
 use super::{pb, PeerNode, TaskResult};
 use super::{state, NodeClient, NodeCommon, NodeRole, NodeServer};
+use anyhow::{anyhow, bail, Context, Result};
 use futures::future::join_all;
 use rand::distributions::{Distribution, Uniform};
 use rand::rngs::SmallRng;
@@ -41,7 +42,7 @@ pub struct Config {
 impl Config {
     pub fn from_reader<Reader: std::io::Read>(
         config_file: Reader,
-    ) -> Result<Config, Box<dyn std::error::Error>> {
+    ) -> Result<Config> {
         let config: Config = ron::de::from_reader(config_file)?;
         trace!("Parsed config from reader: \n{:#?}", config);
         Ok(config)
@@ -53,7 +54,7 @@ impl NodeClient<TokioFile> {
     pub async fn from_config_reader<Reader: std::io::Read>(
         config_file: Reader,
         node_index: u32,
-    ) -> Result<NodeClient<TokioFile>, Box<dyn std::error::Error>> {
+    ) -> Result<NodeClient<TokioFile>> {
         let config = Config::from_reader(config_file)?;
         NodeClient::from_config(config, node_index).await
     }
@@ -62,21 +63,23 @@ impl NodeClient<TokioFile> {
     pub async fn from_config(
         config: Config,
         node_index: u32,
-    ) -> Result<NodeClient<TokioFile>, Box<dyn std::error::Error>> {
+    ) -> Result<NodeClient<TokioFile>> {
         let mut persistent_state_path = PathBuf::from(config.persistent_state_file.clone());
         let file_name_suffix = persistent_state_path
             .file_name()
-            .ok_or("File name should be present in persistent_state_file")?
+            .ok_or(anyhow!("File name should be present in persistent_state_file"))?
             .to_str()
-            .ok_or("persistent_state_file should have valid unicode characters")?;
+            .ok_or(anyhow!("persistent_state_file should have valid unicode characters"))?;
         persistent_state_path.set_file_name(format!("node_{}_{}", node_index, file_name_suffix));
 
+        let persistent_state_file_path = persistent_state_path.clone().into_os_string();
         let persistent_state_file = tokio::fs::OpenOptions::new()
             .write(true)
             .read(true)
             .create(true)
             .open(persistent_state_path)
-            .await?;
+            .await
+            .with_context(|| format!("Error in opening persistent state file at path {:?}", persistent_state_file_path))?;
 
         let distribution = Uniform::from(config.election_timeout_interval.clone());
         let rng = SmallRng::from_entropy();
@@ -87,7 +90,7 @@ impl NodeClient<TokioFile> {
 
         let node_common = Arc::new(NodeCommon {
             persistent_state: tokio::sync::Mutex::new(
-                state::Persistent::new(persistent_state_file).await?,
+                state::Persistent::new(persistent_state_file).await.with_context(|| format!("Unable to init persistent state from file path {:?}", persistent_state_file_path))?,
             ),
             node_index,
         });
@@ -127,14 +130,13 @@ impl NodeClient<TokioFile> {
     async fn peers_from_config(
         config: Config,
         node_index: usize,
-    ) -> Result<(HashMap<usize, PeerNode>, SocketAddr), Box<dyn std::error::Error>> {
+    ) -> Result<(HashMap<usize, PeerNode>, SocketAddr)> {
         let cluster_members = config.cluster_members;
         if node_index >= cluster_members.len() {
-            return Err(format!(
+            bail!(
                 "node_index {node_index} not valid for {} cluster members",
                 cluster_members.len()
-            )
-            .into());
+            );
         }
 
         let listen_addr: SocketAddr = cluster_members[node_index].parse()?;
@@ -142,12 +144,13 @@ impl NodeClient<TokioFile> {
             .into_iter()
             .enumerate()
             .filter(|(idx, _)| *idx != node_index)
-            .map(|(idx, uri_str)| -> Result<_, Box<dyn std::error::Error>> {
+            .map(|(idx, uri_str)| -> Result<_> {
                 let uri = Uri::builder()
                     .scheme("http")
-                    .authority(uri_str)
+                    .authority(uri_str.as_str())
                     .path_and_query("/")
-                    .build()?;
+                    .build()
+                    .with_context(|| format!("Node id {node_index}: Error in building URI for peer {idx}, authority {uri_str}"))?;
                 Ok(PeerNode::from_address(uri, idx, node_index))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -198,7 +201,7 @@ impl NodeClient<TokioFile> {
     /// Process the next event
     // TODO: Should this be async?
     #[tracing::instrument(skip(self), fields(id = self.node_common.node_index))]
-    pub async fn tick(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn tick(&mut self) -> Result<()> {
         self.update_election_timer();
         let timer = self.timer.as_mut();
         tokio::select! {
@@ -317,7 +320,7 @@ impl NodeClient<TokioFile> {
     }
 
     #[tracing::instrument(skip(self), fields(id = self.node_common.node_index))]
-    async fn become_candidate(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn become_candidate(&mut self) -> Result<()> {
         // convert to candidate and request votes.
         // Drop previous RPCs, might be due to a split vote
         trace!("Becoming candidate");
@@ -330,7 +333,8 @@ impl NodeClient<TokioFile> {
             .lock()
             .await
             .increment_current_term_and_vote(self.node_common.node_index as i32)
-            .await?;
+            .await
+            .with_context(|| format!("Node id {}: Error in incrementing term and voting", self.node_common.node_index))?;
 
         // FIXME: Don't make this vec. Need to fix borrow checker issues
         let peer_ids: Vec<usize> = self.peers.keys().copied().collect();
@@ -411,10 +415,8 @@ impl PeerNode {
         address: Uri,
         peer_id: usize,
         node_id: usize,
-    ) -> Result<PeerNode, Box<dyn std::error::Error>> {
-        // trace!("Creating peer node with index {peer_id} to address {address}");
-
-        let endpoint = Endpoint::new(address.clone())?;
+    ) -> Result<PeerNode> {
+        let endpoint = Endpoint::new(address.clone()).with_context(|| format!("Node {}: Error creating peer node Endpoint to id {}, address {}", node_id, peer_id, address))?;
         let channel = endpoint.connect_lazy();
         let rpc_client = RaftClient::new(channel);
         let peer_node: PeerNode = PeerNode {

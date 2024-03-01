@@ -1,5 +1,6 @@
 use std::{collections::HashMap, fmt::Debug, io::SeekFrom};
 
+use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tracing::trace;
 
@@ -53,13 +54,25 @@ pub struct VolatileCandidate {
 const STATE_MAGIC_BYTES: u64 = 0x6d3d5b9932220a79;
 const STATE_FILE_VERSION: u32 = 1;
 
+#[derive(Error, Debug)]
+pub enum StateError {
+    #[error("Given state file's initial bytes don't match magic bytes")]
+    MagicBytesNotMatching,
+
+    #[error("State File version {file_version} is more than supported version {supported_version}")]
+    VersionNotSupported{file_version: u32, supported_version: u32},
+
+    #[error(transparent)]
+    IOError(#[from] std::io::Error),
+}
+
 impl LogEntry {
     async fn from_write<StateFile>(
         index: u64,
         term: u32,
         log: &[u8],
         state_file: &mut StateFile,
-    ) -> Result<LogEntry, Box<dyn std::error::Error>>
+    ) -> Result<LogEntry, StateError>
     where
         StateFile: super::StateFile,
     {
@@ -77,7 +90,7 @@ impl LogEntry {
 
     async fn from_read<StateFile>(
         state_file: &mut StateFile,
-    ) -> Result<LogEntry, Box<dyn std::error::Error>>
+    ) -> Result<LogEntry, StateError>
     where
         StateFile: super::StateFile,
     {
@@ -96,7 +109,7 @@ impl LogEntry {
 }
 
 impl<StateFile: super::StateFile> Persistent<StateFile> {
-    pub async fn new(mut state_file: StateFile) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new(mut state_file: StateFile) -> Result<Self, StateError> {
         let magic_bytes_present = match state_file.read_u64_le().await {
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::UnexpectedEof {
@@ -104,7 +117,7 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
                     trace!("Reached EOF when reading magic bytes from state file, will populate the bytes");
                     false
                 } else {
-                    return Err(Box::new(e));
+                    return Err(StateError::IOError(e));
                 }
             }
             Ok(file_magic_bytes) => {
@@ -112,7 +125,8 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
                     trace!("Found matching magic bytes in state file");
                     true
                 } else {
-                    return Err(format!("Found bytes {:X?} instead of expected magic bytes {:X?}, check provided state file", file_magic_bytes, STATE_MAGIC_BYTES).into());
+                    trace!("Found bytes {:X?} instead of expected magic bytes {:X?}, check provided state file", file_magic_bytes, STATE_MAGIC_BYTES);
+                    return Err(StateError::MagicBytesNotMatching);
                 }
             }
         };
@@ -135,7 +149,7 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
         } else {
             let version = state_file.read_u32_le().await?;
             if version > STATE_FILE_VERSION {
-                return Err(format!("Can't read file with version {version}, supported version is till {STATE_FILE_VERSION}").into());
+                return Err(StateError::VersionNotSupported { file_version: version, supported_version: STATE_FILE_VERSION });
             }
             current_term = FileData::from_state_file_read(&mut state_file).await?;
             voted_for = FileData::from_state_file_read(&mut state_file).await?;
@@ -160,7 +174,7 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
         })
     }
 
-    async fn read_log(state_file: &mut StateFile) -> Result<Vec<LogEntry>, Box<dyn std::error::Error>> {
+    async fn read_log(state_file: &mut StateFile) -> Result<Vec<LogEntry>, StateError> {
         let mut log = Vec::new();
         // FIXME: Assuming if error is returned, we have reached EOF, however there can be other errors as well
         while let Ok(log_entry) = LogEntry::from_read(state_file).await {
@@ -176,7 +190,7 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
     pub async fn update_current_term(
         &mut self,
         new_term: u32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), StateError> {
         // Only update if new term is different from old term.
         if self.current_term.data == new_term {
             return Ok(());
@@ -192,7 +206,7 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
     pub async fn increment_current_term_and_vote(
         &mut self,
         node_id: i32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), StateError> {
         self.current_term
             .write(self.current_term.data + 1, &mut self.state_file)
             .await?;
@@ -207,7 +221,7 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
     pub async fn grant_vote_if_possible(
         &mut self,
         candidate_id: u32,
-    ) -> Result<bool, Box<dyn std::error::Error>> {
+    ) -> Result<bool, StateError> {
         let candidate_id = candidate_id as i32;
         if self.voted_for.data == -1 {
             self.voted_for
@@ -218,7 +232,7 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
             Ok(self.voted_for.data == candidate_id)
         }
     }
-    pub async fn add_log(&mut self, message: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn add_log(&mut self, message: &[u8]) -> Result<(), StateError> {
         let log_index = self.log.last().map(|record| record.index.data).unwrap_or(0) + 1;
         let term = self.current_term();
         let log_entry =
@@ -273,7 +287,7 @@ where
     async fn from_state_file_write<StateFile>(
         data: T,
         state_file: &mut StateFile,
-    ) -> Result<Self, Box<dyn std::error::Error>>
+    ) -> Result<Self, StateError>
     where
         StateFile: super::StateFile + GenericByteIO<T>,
     {
@@ -288,7 +302,7 @@ where
     /// Construct FileData by reading data from the file at current offset
     async fn from_state_file_read<StateFile>(
         state_file: &mut StateFile,
-    ) -> Result<Self, Box<dyn std::error::Error>>
+    ) -> Result<Self, StateError>
     where
         StateFile: super::StateFile + GenericByteIO<T>,
     {
@@ -304,7 +318,7 @@ where
         &mut self,
         data: T,
         state_file: &mut StateFile,
-    ) -> Result<(), Box<dyn std::error::Error>>
+    ) -> Result<(), StateError>
     where
         StateFile: super::StateFile + GenericByteIO<T>,
     {
