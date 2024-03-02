@@ -1,7 +1,6 @@
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 
 use rand::distributions::Uniform;
-use rand::rngs::SmallRng;
 use tokio::{
     io::{AsyncRead, AsyncSeek, AsyncWrite},
     task::JoinSet,
@@ -58,7 +57,6 @@ pub struct NodeClient<SFile: StateFile> {
     /// This is used to reset the election timer, and is updated by server on receiving append entries RPCs
     last_leader_message_time: Arc<std::sync::Mutex<Instant>>,
 
-    rng: SmallRng,
     /// map from peer_id to PeerNode
     peers: HashMap<usize, PeerNode>,
     jobs: JoinSet<TaskResult>,

@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use std::net::SocketAddr;
@@ -27,6 +28,10 @@ use tracing::{debug, error, info, trace, warn};
 // pub trait StateMachine {
 //     fn transition(msg: Message);
 // }
+
+thread_local! {
+    static RNG: RefCell<SmallRng> = RefCell::new(SmallRng::from_entropy());
+}
 
 /// Configuration for Raft Consensus, can be read from any file, currently only RON is supported
 #[serde_with::serde_as]
@@ -86,7 +91,6 @@ impl NodeClient<TokioFile> {
             })?;
 
         let distribution = Uniform::from(config.election_timeout_interval.clone());
-        let rng = SmallRng::from_entropy();
         let heartbeat_interval = config.heartbeat_interval;
         let (peers, listen_addr) = Self::peers_from_config(config, node_index as usize).await?;
         let election_timeout = Duration::from_secs(0);
@@ -116,7 +120,6 @@ impl NodeClient<TokioFile> {
             heartbeat_interval,
             timer,
             last_leader_message_time: Arc::clone(&last_leader_message_time),
-            rng,
             peers,
             jobs: JoinSet::new(),
         };
@@ -181,9 +184,9 @@ impl NodeClient<TokioFile> {
 
     #[tracing::instrument(skip_all, fields(id = self.node_common.node_index))]
     fn set_new_election_timeout(&mut self) {
-        let timeout = Duration::from_micros(
-            (self.election_timer_distribution.sample(&mut self.rng) * 1000_f32).floor() as u64,
-        );
+        let timeout = RNG.with_borrow_mut(|rng| Duration::from_micros(
+            (self.election_timer_distribution.sample(rng) * 1000_f32).floor() as u64,
+        ));
         trace!("New election timeout is {} millis", timeout.as_millis());
         self.election_timeout = timeout;
     }
