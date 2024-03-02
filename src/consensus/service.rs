@@ -33,7 +33,10 @@ impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
         let success =
             if persistent_state.has_matching_entry(request.prev_log_index, request.prev_log_term) {
                 for entry in request.entries {
-                    persistent_state.add_log(&entry).await.map_err(|e| Status::unavailable(e.to_string()))?;
+                    persistent_state
+                        .add_log(&entry)
+                        .await
+                        .map_err(|e| Status::unavailable(e.to_string()))?;
                     // TODO: If there's an error here, we probably need to restart the Node
                 }
                 true
