@@ -24,6 +24,7 @@ use tokio::task::JoinSet;
 use tokio::time::{Duration, Instant};
 use tonic::transport::{Endpoint, Server, Uri};
 use tracing::{debug, error, info, trace, warn};
+use void::Void as Never;
 
 // type Message = Vec<u8>;
 
@@ -237,95 +238,101 @@ impl NodeClient<TokioFile> {
             .reset(Instant::now() + self.heartbeat_interval);
     }
 
-    /// Process the next event
-    // TODO: Should this be async?
+    /// Start ticking and keep doing that forever.
+    /// Note that this function only returns in case of an error in which case Node is
+    /// dropped. So we always start out this function as a fresh follower node
     #[tracing::instrument(skip(self), fields(id = self.node_common.node_index))]
-    pub async fn tick(&mut self) -> Result<()> {
-        self.update_election_timer().await;
-        let timer = self.timer.as_mut();
-        tokio::select! {
-            () = timer => {
-                // Update election timer again. If it has elapsed then do election stuff
-                self.update_election_timer().await;
-                if self.timer.is_elapsed() {
-                    let role = self.node_common.role.lock().await;
-                    match role.deref() {
-                        NodeRole::Follower => {
-                            std::mem::drop(role);
-                            self.reset_and_update_election_timer().await;
-                            self.become_candidate().await?;
+    pub async fn tick_forever(mut self) -> Result<Never> {
+        // We start out as follower, and we never exit this function in usual case, so we can always
+        // assume that using election timeout is fine here.
+        let mut timer = Box::pin(tokio::time::sleep(
+            self.election_timeout.load(Ordering::SeqCst),
+        ));
+
+        loop {
+            let timer = timer.as_mut();
+            tokio::select! {
+                () = timer => {
+                    // Update election timer again. If it has elapsed then do election stuff
+                    self.update_election_timer().await;
+                    if self.timer.is_elapsed() {
+                        let role = self.node_common.role.lock().await;
+                        match role.deref() {
+                            NodeRole::Follower => {
+                                std::mem::drop(role);
+                                self.reset_and_update_election_timer().await;
+                                self.become_candidate().await?;
+                            }
+                            NodeRole::Candidate(_) => {
+                                std::mem::drop(role);
+                                // in case of a split vote, the election timer may expire when we're still a candidate
+                                self.reset_and_update_election_timer().await;
+                                self.become_candidate().await?;
+                            }
+                            NodeRole::Leader(_) => {
+                                std::mem::drop(role);
+                                self.restart_heartbeat_timer();
+                                self.send_heartbeats().await;
+                            }
                         }
-                        NodeRole::Candidate(_) => {
-                            std::mem::drop(role);
-                            // in case of a split vote, the election timer may expire when we're still a candidate
-                            self.reset_and_update_election_timer().await;
-                            self.become_candidate().await?;
-                        }
-                        NodeRole::Leader(_) => {
-                            std::mem::drop(role);
-                            self.restart_heartbeat_timer();
-                            self.send_heartbeats().await;
-                        }
+                    } else {
+                        debug!("This tick won't do anything since timer got updated after select");
                     }
-                } else {
-                    debug!("This tick won't do anything since timer got updated after select");
                 }
-            }
-            Some(res) = self.jobs.join_next(), if !self.jobs.is_empty() => {
-                match res {
-                    Err(join_error) => {
-                        if join_error.is_panic() {
-                            error!("Some task panicked..");
+                Some(res) = self.jobs.join_next(), if !self.jobs.is_empty() => {
+                    match res {
+                        Err(join_error) => {
+                            if join_error.is_panic() {
+                                error!("Some task panicked..");
+                            }
                         }
-                    }
-                    Ok(TaskResult::VoteResponse(vote_response)) => {
-                        if vote_response.vote_granted {
-                            trace!("Received vote");
-                            let mut role = self.node_common.role.lock().await;
-                            if let NodeRole::Candidate(candidate_state) = role.deref_mut() {
-                                candidate_state.votes_received += 1;
-                                if candidate_state.votes_received > (1 + self.peers.len()) / 2 {
-                                    info!("Elected as leader woohoo");
-                                    *role = NodeRole::Leader(state::VolatileLeader::new(&self.peers));
-                                    std::mem::drop(role);
-                                    self.send_heartbeats().await;
-                                    self.restart_heartbeat_timer();
+                        Ok(TaskResult::VoteResponse(vote_response)) => {
+                            if vote_response.vote_granted {
+                                trace!("Received vote");
+                                let mut role = self.node_common.role.lock().await;
+                                if let NodeRole::Candidate(candidate_state) = role.deref_mut() {
+                                    candidate_state.votes_received += 1;
+                                    if candidate_state.votes_received > (1 + self.peers.len()) / 2 {
+                                        info!("Elected as leader woohoo");
+                                        *role = NodeRole::Leader(state::VolatileLeader::new(&self.peers));
+                                        std::mem::drop(role);
+                                        self.send_heartbeats().await;
+                                        self.restart_heartbeat_timer();
+                                    }
+                                } else {
+                                    // This can happen when one response was delayed and we got majority votes before
+                                    debug!("Received vote response from peer, however current role is not candidate");
                                 }
                             } else {
-                                // This can happen when one response was delayed and we got majority votes before
-                                debug!("Received vote response from peer, however current role is not candidate");
-                            }
-                        } else {
-                            let mut persistent_state = self.node_common.persistent_state.lock().await;
-                            if vote_response.term > persistent_state.current_term() {
-                                // Our term was stale, update it and abort all
-                                trace!(current_term = persistent_state.current_term(), vote_response.term);
-                                persistent_state.update_current_term(vote_response.term).await?;
-                                self.jobs.shutdown().await;
+                                let mut persistent_state = self.node_common.persistent_state.lock().await;
+                                if vote_response.term > persistent_state.current_term() {
+                                    // Our term was stale, update it and abort all
+                                    trace!(current_term = persistent_state.current_term(), vote_response.term);
+                                    persistent_state.update_current_term(vote_response.term).await?;
+                                    self.jobs.shutdown().await;
+                                }
                             }
                         }
-                    }
-                    Ok(TaskResult::VoteFail(peer_id)) => {
-                        if matches!(*self.node_common.role.lock().await, NodeRole::Candidate(_)) {
-                            self.request_vote(peer_id).await;
+                        Ok(TaskResult::VoteFail(peer_id)) => {
+                            if matches!(*self.node_common.role.lock().await, NodeRole::Candidate(_)) {
+                                self.request_vote(peer_id).await;
+                            }
                         }
-                    }
-                    Ok(TaskResult::HeartbeatSuccess(peer_id, append_response)) => {
-                        trace!(task_result = "Heartbeat success", peer_id, append_response.term, append_response.success);
-                        self.peers.get_mut(&peer_id).unwrap().pending_heartbeat = false;
-                    }
-                    Ok(TaskResult::HeartbeatFail(peer_id)) => {
-                        if matches!(*self.node_common.role.lock().await, NodeRole::Leader(_)) {
-                            self.retry_heartbeat(peer_id).await;
-                        } else {
-                            debug!("Had to retry heartbeat to {}, but not doing so since we're not leader anymore", peer_id);
+                        Ok(TaskResult::HeartbeatSuccess(peer_id, append_response)) => {
+                            trace!(task_result = "Heartbeat success", peer_id, append_response.term, append_response.success);
+                            self.peers.get_mut(&peer_id).unwrap().pending_heartbeat = false;
+                        }
+                        Ok(TaskResult::HeartbeatFail(peer_id)) => {
+                            if matches!(*self.node_common.role.lock().await, NodeRole::Leader(_)) {
+                                self.retry_heartbeat(peer_id).await;
+                            } else {
+                                debug!("Had to retry heartbeat to {}, but not doing so since we're not leader anymore", peer_id);
+                            }
                         }
                     }
                 }
-            }
-        };
-
-        Ok(())
+            };
+        }
     }
 
     #[tracing::instrument(skip(self), fields(id = self.node_common.node_index))]

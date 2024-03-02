@@ -71,13 +71,14 @@ impl Cluster {
         }
 
         let mut jobs = JoinSet::new();
-        for mut node in nodes.into_iter() {
+        for node in nodes.into_iter() {
             jobs.spawn(async move {
-                loop {
-                    node.tick().await.map_err(|e| ClusterError::NodeCrash {
-                        node_id: node.id(),
-                        source: e,
-                    })?;
+                let node_id = node.id();
+                if let Err(e) = node.tick_forever().await {
+                    Err(ClusterError::NodeCrash { node_id, source: e })
+                } else {
+                    // Unreachable since tick_forever always returns an Err
+                    unreachable!()
                 }
             });
         }

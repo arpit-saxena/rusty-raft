@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
 
 async fn run_node(node_id: u32, config_path: Box<Path>) -> Result<()> {
     let config_file = File::open(config_path.clone())?;
-    let mut raft_node = match NodeClient::from_config_reader(config_file, node_id).await {
+    let raft_node = match NodeClient::from_config_reader(config_file, node_id).await {
         Err(e) => {
             eprintln!(
                 "Error in creating node using config path '{:?}': {:#?}",
@@ -57,10 +57,9 @@ async fn run_node(node_id: u32, config_path: Box<Path>) -> Result<()> {
         }
         Ok(n) => n,
     };
-    loop {
-        // trace!("Ticking RaftNode");
-        raft_node.tick().await?;
-    }
+
+    raft_node.tick_forever().await?;
+    Ok(())
 }
 
 async fn run_cluster(config_path: Box<Path>, num_nodes: u16) -> Result<()> {
