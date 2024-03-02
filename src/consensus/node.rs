@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use super::atomic_util::AtomicDuration;
+use super::atomic_util::{AtomicDuration, AtomicInstant};
 use super::pb::raft_client::RaftClient;
 use super::pb::raft_server::RaftServer;
 use super::{pb, PeerNode, TaskResult};
@@ -119,7 +119,7 @@ impl NodeClient<TokioFile> {
             role: tokio::sync::Mutex::new(NodeRole::Follower),
         });
 
-        let last_leader_message_time = Arc::new(std::sync::Mutex::new(Instant::now()));
+        let last_leader_message_time = Arc::new(AtomicInstant::new(Instant::now())?);
         let mut node = NodeClient {
             node_common: Arc::clone(&node_common),
             common_volatile_state: state::VolatileCommon::new(),
@@ -216,16 +216,18 @@ impl NodeClient<TokioFile> {
                 let election_timeout = self.election_timeout.load(Ordering::SeqCst);
                 self.timer
                     .as_mut()
-                    .reset(*self.last_leader_message_time.lock().unwrap() + election_timeout);
+                    .reset(self.last_leader_message_time.load(Ordering::SeqCst) + election_timeout);
             }
         }
     }
 
     async fn reset_and_update_election_timer(&mut self) {
-        {
-            let mut last_leader_message_time = self.last_leader_message_time.lock().unwrap();
-            *last_leader_message_time = Instant::now();
-        }
+        self.last_leader_message_time
+            .store(Instant::now(), Ordering::SeqCst)
+            .context(
+                "Error in updating last leader message time to Instant::now, some bug in Instant!",
+            )
+            .unwrap();
         self.update_election_timer().await;
     }
 

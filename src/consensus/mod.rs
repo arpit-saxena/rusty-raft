@@ -4,7 +4,7 @@ use rand::distributions::Uniform;
 use tokio::{
     io::{AsyncRead, AsyncSeek, AsyncWrite},
     task::JoinSet,
-    time::{Duration, Instant, Sleep},
+    time::{Duration, Sleep},
 };
 use tonic::transport::{Channel, Uri};
 
@@ -20,7 +20,7 @@ mod state;
 pub use node::Config;
 use pb::raft_client::RaftClient;
 
-use self::atomic_util::AtomicDuration;
+use atomic_util::{AtomicDuration, AtomicInstant};
 
 pub trait StateFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + 'static + Unpin {}
 impl<T> StateFile for T where T: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + 'static + Unpin {}
@@ -58,7 +58,7 @@ pub struct NodeClient<SFile: StateFile> {
     /// This timer is used as heartbeat timer when Leader, election timeout otherwise
     timer: Pin<Box<Sleep>>,
     /// This is used to reset the election timer, and is updated by server on receiving append entries RPCs
-    last_leader_message_time: Arc<std::sync::Mutex<Instant>>,
+    last_leader_message_time: Arc<AtomicInstant>,
 
     /// map from peer_id to PeerNode
     peers: HashMap<usize, PeerNode>,
@@ -67,7 +67,7 @@ pub struct NodeClient<SFile: StateFile> {
 
 pub struct NodeServer<SFile: StateFile> {
     node_common: Arc<NodeCommon<SFile>>,
-    last_leader_message_time: Arc<std::sync::Mutex<Instant>>,
+    last_leader_message_time: Arc<AtomicInstant>,
 }
 
 /// Represents information about a peer node that a particular node has and owns

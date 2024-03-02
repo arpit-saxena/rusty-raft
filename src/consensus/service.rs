@@ -1,18 +1,22 @@
+use std::sync::atomic::Ordering;
+
 use super::pb::raft_server::Raft;
 use super::pb::{AppendEntriesRequest, AppendEntriesResponse, VoteRequest, VoteResponse};
 use super::NodeServer;
 
+use anyhow::Context;
 use tokio::time::Instant;
 use tonic::{Request, Response, Status};
 use tracing::trace;
 
 impl<StateFile: super::StateFile> NodeServer<StateFile> {
     fn update_last_leader_message_time(&self) -> Result<(), Status> {
-        let mut last_leader_message_time = self
-            .last_leader_message_time
-            .lock()
-            .map_err(|_| Status::internal("Poison error"))?;
-        *last_leader_message_time = Instant::now();
+        self.last_leader_message_time
+            .store(Instant::now(), Ordering::SeqCst)
+            .context(
+                "Error in updating last leader message time to INstant::now, some bug in Instant!",
+            )
+            .map_err(|e| Status::from_error(e.into()))?;
         Ok(())
     }
 }
