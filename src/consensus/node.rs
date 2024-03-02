@@ -5,8 +5,10 @@ use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut, RangeInclusive};
 use std::path::{Path, PathBuf};
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use super::atomic_util::AtomicDuration;
 use super::pb::raft_client::RaftClient;
 use super::pb::raft_server::RaftServer;
 use super::{pb, PeerNode, TaskResult};
@@ -95,6 +97,12 @@ impl NodeClient<TokioFile> {
         let (peers, listen_addr) = Self::peers_from_config(config, node_index as usize).await?;
         let election_timeout = Duration::from_secs(0);
         let timer = Box::pin(tokio::time::sleep(election_timeout));
+        let election_timeout = AtomicDuration::new(election_timeout).with_context(|| {
+            format!(
+                "Node id {}: Error in convert election_timeout to AtomicDuration",
+                node_index
+            )
+        })?;
 
         let node_common = Arc::new(NodeCommon {
             persistent_state: tokio::sync::Mutex::new(
@@ -123,7 +131,7 @@ impl NodeClient<TokioFile> {
             peers,
             jobs: JoinSet::new(),
         };
-        node.set_new_election_timeout();
+        node.set_new_election_timeout()?;
         node.update_election_timer().await;
 
         trace!("Spawning server to listen on {}", listen_addr);
@@ -183,21 +191,32 @@ impl NodeClient<TokioFile> {
     }
 
     #[tracing::instrument(skip_all, fields(id = self.node_common.node_index))]
-    fn set_new_election_timeout(&mut self) {
-        let timeout = RNG.with_borrow_mut(|rng| Duration::from_micros(
-            (self.election_timer_distribution.sample(rng) * 1000_f32).floor() as u64,
-        ));
+    fn set_new_election_timeout(&self) -> Result<()> {
+        let timeout = RNG.with_borrow_mut(|rng| {
+            Duration::from_micros(
+                (self.election_timer_distribution.sample(rng) * 1000_f32).floor() as u64,
+            )
+        });
         trace!("New election timeout is {} millis", timeout.as_millis());
-        self.election_timeout = timeout;
+        self.election_timeout
+            .store(timeout, Ordering::SeqCst)
+            .with_context(|| {
+                format!(
+                    "Node id {}: Error in storing new election timeout",
+                    self.node_common.node_index
+                )
+            })?;
+        Ok(())
     }
 
     async fn update_election_timer(&mut self) {
         match *self.node_common.role.lock().await {
             NodeRole::Leader(_) => {}
             _ => {
-                self.timer.as_mut().reset(
-                    *self.last_leader_message_time.lock().unwrap() + self.election_timeout,
-                );
+                let election_timeout = self.election_timeout.load(Ordering::SeqCst);
+                self.timer
+                    .as_mut()
+                    .reset(*self.last_leader_message_time.lock().unwrap() + election_timeout);
             }
         }
     }

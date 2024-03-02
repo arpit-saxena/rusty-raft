@@ -12,12 +12,15 @@ mod pb {
     tonic::include_proto!("raft");
 }
 
+mod atomic_util;
 mod macro_util;
 mod node;
 mod service;
 mod state;
 pub use node::Config;
 use pb::raft_client::RaftClient;
+
+use self::atomic_util::AtomicDuration;
 
 pub trait StateFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + 'static + Unpin {}
 impl<T> StateFile for T where T: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + 'static + Unpin {}
@@ -49,7 +52,7 @@ pub struct NodeClient<SFile: StateFile> {
     node_common: Arc<NodeCommon<SFile>>,
     common_volatile_state: state::VolatileCommon,
 
-    election_timeout: Duration,
+    election_timeout: AtomicDuration,
     election_timer_distribution: Uniform<f32>,
     heartbeat_interval: Duration,
     /// This timer is used as heartbeat timer when Leader, election timeout otherwise
