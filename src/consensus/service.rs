@@ -11,7 +11,8 @@ use tracing::trace;
 
 impl<StateFile: super::StateFile> NodeServer<StateFile> {
     fn update_last_leader_message_time(&self) -> Result<(), Status> {
-        self.last_leader_message_time
+        self.node
+            .last_leader_message_time
             .store(Instant::now(), Ordering::SeqCst)
             .context(
                 "Error in updating last leader message time to INstant::now, some bug in Instant!",
@@ -23,7 +24,7 @@ impl<StateFile: super::StateFile> NodeServer<StateFile> {
 
 #[tonic::async_trait]
 impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
-    #[tracing::instrument(skip_all, fields(id = self.node_common.node_index))]
+    #[tracing::instrument(skip_all, fields(id = self.node.node_index))]
     async fn append_entries(
         &self,
         request: Request<AppendEntriesRequest>,
@@ -31,7 +32,7 @@ impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
         trace!("Append entries called");
         self.update_last_leader_message_time()?;
 
-        let mut persistent_state = self.node_common.persistent_state.lock().await;
+        let mut persistent_state = self.node.persistent_state.lock().await;
         let request = request.into_inner();
 
         let success =
@@ -61,7 +62,7 @@ impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
         request: Request<VoteRequest>,
     ) -> Result<Response<VoteResponse>, Status> {
         let request = request.into_inner();
-        let mut persistent_state = self.node_common.persistent_state.lock().await;
+        let mut persistent_state = self.node.persistent_state.lock().await;
 
         let vote_granted = if request.term < persistent_state.current_term() {
             false

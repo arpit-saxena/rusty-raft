@@ -2,7 +2,7 @@ use std::{fs::File, path::Path, process::exit};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use raft::{cluster::Cluster, consensus::NodeClient};
+use raft::{cluster::Cluster, consensus::Node};
 
 #[derive(Debug, Subcommand)]
 enum CliMode {
@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
 
 async fn run_node(node_id: u32, config_path: Box<Path>) -> Result<()> {
     let config_file = File::open(config_path.clone())?;
-    let raft_node = match NodeClient::from_config_reader(config_file, node_id).await {
+    let raft_node = match Node::from_config_reader(config_file, node_id).await {
         Err(e) => {
             eprintln!(
                 "Error in creating node using config path '{:?}': {:#?}",

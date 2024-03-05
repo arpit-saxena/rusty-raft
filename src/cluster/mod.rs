@@ -11,7 +11,7 @@ use tokio::task::{JoinError, JoinSet};
 use tracing::trace;
 
 use crate::consensus::Config as NodeConfig;
-use crate::consensus::NodeClient;
+use crate::consensus::Node;
 
 #[serde_with::serde_as]
 #[derive(Debug, Serialize, Deserialize)]
@@ -67,7 +67,7 @@ impl Cluster {
 
         let mut nodes = Vec::new();
         for node_id in 0..num_nodes {
-            nodes.push(NodeClient::from_config(node_config.clone(), node_id as u32).await?);
+            nodes.push(Node::from_config(node_config.clone(), node_id as u32).await?);
         }
 
         let mut jobs = JoinSet::new();

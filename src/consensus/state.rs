@@ -1,10 +1,11 @@
-use std::{collections::HashMap, fmt::Debug, io::SeekFrom};
+use std::{collections::HashMap, fmt::Debug, io::SeekFrom, mem::size_of};
 
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tonic::transport::Channel;
 use tracing::trace;
 
-use super::{macro_util::GenericByteIO, PeerNode};
+use super::{macro_util::GenericByteIO, pb::raft_client::RaftClient, PeerNode};
 
 struct LogEntry {
     index: FileData<u64>,
@@ -38,6 +39,8 @@ pub struct VolatileFollowerState {
     pub next_index: u64,
     /// index of highest log entry known to be replicated on the server (initialized to 0, increases monotonically)
     pub match_index: u64,
+    /// rpc client to send entries to follower
+    pub rpc_client: RaftClient<Channel>,
 }
 
 /// Volatile state that is stored only on leaders
@@ -46,6 +49,7 @@ pub struct VolatileLeader {
 }
 
 /// Volatile state that is stored only on candidates
+#[derive(Debug)]
 pub struct VolatileCandidate {
     /// number of votes received
     pub votes_received: usize,
@@ -109,6 +113,12 @@ impl LogEntry {
             length,
         })
     }
+}
+
+pub struct AppendLogEntry {
+    pub entries: Vec<Vec<u8>>,
+    pub last_log_term: u32,
+    pub last_log_idx: u64,
 }
 
 impl<StateFile: super::StateFile> Persistent<StateFile> {
@@ -277,25 +287,70 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
     pub fn last_log_index(&self) -> u64 {
         self.log.last().map(|entry| entry.index.data).unwrap_or(0)
     }
-    pub fn last_log_term(&self) -> u32 {
-        self.log.last().map(|entry| entry.term.data).unwrap_or(0)
+    // Very very inefficient implementation, just for completeness purposes
+    pub async fn get_entries_from(&mut self, index: u64) -> Result<AppendLogEntry, StateError> {
+        let mut log_idx = 0;
+        for (i, entry) in self.log.iter().enumerate().rev() {
+            if entry.index.data == index {
+                log_idx = i;
+                break;
+            }
+        }
+
+        let (last_log_idx, last_log_term) = if log_idx > 0 {
+            let last_log_entry = &self.log[log_idx - 1];
+            (last_log_entry.index.data, last_log_entry.term.data)
+        } else {
+            (0, 0)
+        };
+
+        let mut entries = Vec::new();
+        for i in log_idx..self.log.len() {
+            let log_entry = &self.log[i];
+            let current_pos = self.state_file.stream_position().await?;
+            let length = log_entry.length.data as usize;
+            self.state_file.seek(log_entry.length.position).await?;
+            self.state_file
+                .seek(SeekFrom::Current(size_of::<u64>() as i64))
+                .await?;
+            let mut entry = Vec::with_capacity(length);
+            self.state_file
+                .read_exact(&mut entry.as_mut_slice()[0..length])
+                .await?;
+            entries.push(entry);
+            self.state_file.seek(SeekFrom::Start(current_pos)).await?;
+        }
+
+        Ok(AppendLogEntry {
+            entries,
+            last_log_term,
+            last_log_idx,
+        })
     }
 }
 
 impl VolatileFollowerState {
-    pub fn new() -> VolatileFollowerState {
+    pub fn new(next_index: u64, rpc_client: RaftClient<Channel>) -> VolatileFollowerState {
         VolatileFollowerState {
-            next_index: 1, // TODO: Initialize this properly
+            next_index,
             match_index: 0,
+            rpc_client,
         }
     }
 }
 
 impl VolatileLeader {
-    pub fn new(peers: &HashMap<usize, PeerNode>) -> VolatileLeader {
+    pub fn new<StateFile: super::StateFile>(
+        peers: &HashMap<usize, PeerNode>,
+        persistent_state: &Persistent<StateFile>,
+    ) -> VolatileLeader {
         let mut follower_states = HashMap::new();
-        for peer_id in peers.keys() {
-            follower_states.insert(*peer_id, VolatileFollowerState::new());
+        let next_index = persistent_state.last_log_index() + 1;
+        for (peer_id, peer) in peers {
+            follower_states.insert(
+                *peer_id,
+                VolatileFollowerState::new(next_index, peer.rpc_client.clone()),
+            );
         }
         VolatileLeader { follower_states }
     }

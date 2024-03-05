@@ -1,10 +1,11 @@
-use std::{collections::HashMap, pin::Pin, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
+use atomic_enum::atomic_enum;
 use rand::distributions::Uniform;
 use tokio::{
     io::{AsyncRead, AsyncSeek, AsyncWrite},
-    task::JoinSet,
-    time::{Duration, Sleep},
+    sync::watch,
+    time::Duration,
 };
 use tonic::transport::{Channel, Uri};
 
@@ -25,10 +26,12 @@ use atomic_util::{AtomicDuration, AtomicInstant};
 pub trait StateFile: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + 'static + Unpin {}
 impl<T> StateFile for T where T: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + 'static + Unpin {}
 
+#[atomic_enum] // TODO: Look if there's anything better available or make something
+#[derive(PartialEq)]
 enum NodeRole {
     Follower,
-    Candidate(state::VolatileCandidate),
-    Leader(state::VolatileLeader),
+    Candidate,
+    Leader,
 }
 
 enum TaskResult {
@@ -36,38 +39,31 @@ enum TaskResult {
     VoteResponse(pb::VoteResponse),
     /// node index to which request failed, to retry
     VoteFail(usize),
-    HeartbeatSuccess(usize, pb::AppendEntriesResponse),
-    /// node index to which request failed, to retry
-    HeartbeatFail(usize),
-}
-
-pub struct NodeCommon<SFile: StateFile> {
-    persistent_state: tokio::sync::Mutex<state::Persistent<SFile>>,
-    node_index: u32,
-    role: tokio::sync::Mutex<NodeRole>,
+    /// Task that was syncing logs to followers exited
+    LeaderExit,
 }
 
 /// Raft Node with members used for establishing consensus
-pub struct NodeClient<SFile: StateFile> {
-    node_common: Arc<NodeCommon<SFile>>,
+pub struct Node<SFile: StateFile> {
+    persistent_state: tokio::sync::Mutex<state::Persistent<SFile>>,
+    node_index: u32,
+    listen_addr: SocketAddr,
+    role: AtomicNodeRole,
     common_volatile_state: state::VolatileCommon,
 
     election_timeout: AtomicDuration,
     election_timer_distribution: Uniform<f32>,
     heartbeat_interval: Duration,
-    /// This timer is used as heartbeat timer when Leader, election timeout otherwise
-    timer: Pin<Box<Sleep>>,
     /// This is used to reset the election timer, and is updated by server on receiving append entries RPCs
-    last_leader_message_time: Arc<AtomicInstant>,
+    last_leader_message_time: AtomicInstant,
 
     /// map from peer_id to PeerNode
     peers: HashMap<usize, PeerNode>,
-    jobs: JoinSet<TaskResult>,
 }
 
 pub struct NodeServer<SFile: StateFile> {
-    node_common: Arc<NodeCommon<SFile>>,
-    last_leader_message_time: Arc<AtomicInstant>,
+    node: Arc<Node<SFile>>,
+    _entries_informer: watch::Sender<u64>,
 }
 
 /// Represents information about a peer node that a particular node has and owns
@@ -76,7 +72,4 @@ pub struct PeerNode {
     _address: Uri,
     rpc_client: RaftClient<Channel>,
     node_index: usize,
-    /// Only used by leaders, true if a heartbeat is pending that will be retried
-    /// This will ensure we don't queue up more heartbeats than necessary
-    pending_heartbeat: bool,
 }

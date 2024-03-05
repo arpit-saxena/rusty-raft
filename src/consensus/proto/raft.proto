@@ -7,7 +7,7 @@ service Raft {
 }
 
 message AppendEntriesRequest {
-  // candidate's term
+  // leader's term
   uint32 term = 1;
   // so follower can redirect clients
   uint32 leader_id = 2;
