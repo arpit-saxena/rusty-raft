@@ -1,7 +1,10 @@
 use std::sync::atomic::Ordering;
 
 use super::pb::raft_server::Raft;
-use super::pb::{AppendEntriesRequest, AppendEntriesResponse, VoteRequest, VoteResponse};
+use super::pb::{
+    AppendEntriesRequest, AppendEntriesResponse, PerformActionRequest, PerformActionResponse,
+    VoteRequest, VoteResponse,
+};
 use super::NodeServer;
 
 use anyhow::Context;
@@ -96,5 +99,13 @@ impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
             vote_granted,
         };
         Ok(Response::new(vote_response))
+    }
+
+    #[tracing::instrument(skip_all, id = self.node_common.node_index)]
+    async fn perform_action(
+        &self,
+        _request: Request<PerformActionRequest>,
+    ) -> Result<Response<PerformActionResponse>, Status> {
+        todo!();
     }
 }

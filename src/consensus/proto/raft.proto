@@ -4,6 +4,7 @@ package raft;
 service Raft {
   rpc AppendEntries (AppendEntriesRequest) returns (AppendEntriesResponse);
   rpc RequestVote (VoteRequest) returns (VoteResponse);
+  rpc PerformAction (PerformActionRequest) returns (PerformActionResponse);
 }
 
 message AppendEntriesRequest {
@@ -45,4 +46,17 @@ message VoteResponse {
   uint32 term = 1;
   // true means candidate received vote
   bool vote_granted = 2;
+}
+
+message PerformActionRequest {
+  // action to perform
+  bytes action = 1;
+}
+
+message PerformActionResponse {
+  // the action was successful or not; if not, redirect request to 
+  // leader. Leader Id follows
+  bool success = 1;
+  // Leader ID
+  uint32 leader_id = 2;
 }
