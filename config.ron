@@ -5,6 +5,6 @@
         "127.0.0.1:38419",
         "127.0.0.1:29123",
     ],
-    election_timeout_interval: RangeInclusive(start: 2000.0, end: 4000.0),
-    heartbeat_interval: 1000,
+    election_timeout_interval: RangeInclusive(start: 200.0, end: 400.0),
+    heartbeat_interval: 100,
 )
