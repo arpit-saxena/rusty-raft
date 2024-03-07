@@ -1,6 +1,9 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
-use tokio::time::{Duration, Instant};
+use tokio::{
+    sync::watch,
+    time::{Duration, Instant},
+};
 
 pub struct AtomicDuration {
     duration_nanos: AtomicU64,
@@ -70,5 +73,28 @@ impl AtomicInstant {
         let offset = instant - self.base;
         self.offset.store(offset, ordering)?;
         Ok(())
+    }
+}
+
+/// Implement new function for tokio::sync::watch::Sender that has an easier interface than the provided
+/// send_ conditional functions.
+pub trait UpdateIfNew {
+    type Item;
+    fn send_if_new(&self, item: Self::Item) -> Self::Item;
+}
+
+impl<T> UpdateIfNew for watch::Sender<T>
+where
+    T: Copy + PartialEq,
+{
+    type Item = T;
+
+    fn send_if_new(&self, item: Self::Item) -> Self::Item {
+        let mut old_item = *self.borrow();
+        self.send_if_modified(|current_item| {
+            old_item = std::mem::replace(current_item, item);
+            item != old_item
+        });
+        old_item
     }
 }

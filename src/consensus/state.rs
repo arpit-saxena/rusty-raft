@@ -256,8 +256,8 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
         Ok(())
     }
     pub fn has_matching_entry(&self, index: u64, term: u32) -> bool {
-        // index and term both being 0 implies null entry (present in empty list)
-        if index == 0 && term == 0 {
+        // index being 0 implies null entry (present in empty list)
+        if index == 0 {
             return true;
         }
 

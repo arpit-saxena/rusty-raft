@@ -11,12 +11,12 @@ use std::sync::Arc;
 
 use crate::consensus::state::AppendLogEntry;
 
-use super::atomic_util::{AtomicDuration, AtomicInstant};
+use super::atomic_util::{AtomicDuration, AtomicInstant, UpdateIfNew};
 use super::pb::raft_client::RaftClient;
 use super::pb::raft_server::RaftServer;
 use super::state::VolatileCandidate;
 use super::{pb, PeerNode, TaskResult};
-use super::{state, AtomicNodeRole, Node, NodeRole, NodeServer};
+use super::{state, Node, NodeRole, NodeServer};
 use anyhow::{anyhow, bail, Context, Result};
 use futures::future::join_all;
 use rand::distributions::{Distribution, Uniform};
@@ -125,6 +125,7 @@ impl Node<TokioFile> {
             )
         })?;
 
+        let (role_informer, _) = watch::channel(NodeRole::Follower);
         let node = Node {
             persistent_state: tokio::sync::Mutex::new(
                 state::Persistent::new(persistent_state_file)
@@ -138,12 +139,12 @@ impl Node<TokioFile> {
             ),
             node_index,
             listen_addr,
-            role: AtomicNodeRole::new(NodeRole::Follower),
             common_volatile_state: state::VolatileCommon::new(),
             election_timeout,
             election_timer_distribution: distribution,
             heartbeat_interval,
             last_leader_message_time: AtomicInstant::new(Instant::now())?,
+            role_informer,
             peers,
         };
         node.set_new_election_timeout()?;
@@ -213,7 +214,7 @@ impl Node<TokioFile> {
     }
 
     async fn update_election_timer(&self, timer: &mut Pin<Box<Sleep>>) {
-        match self.role.load(Ordering::SeqCst) {
+        match *self.role_informer.borrow() {
             NodeRole::Leader => {}
             _ => {
                 let election_timeout = self.election_timeout.load(Ordering::SeqCst);
@@ -260,6 +261,7 @@ impl Node<TokioFile> {
 
     /// Starting syncing entries to given follower. New entries are indicated by receiving on entries_receiver. Task exists when entries_receiver is closed
     /// and all other log entries have been synced
+    #[tracing::instrument(skip_all, fields(id = self.node_index, peer_id))]
     async fn sync_log_to_follower(
         &self,
         peer_id: usize,
@@ -273,7 +275,7 @@ impl Node<TokioFile> {
 
         // Will access this and store for use in the future since it won't change in duration of this function
         // Is there a way to ensure this by types??
-        let term = self.persistent_state.lock().await.current_term();
+        let leader_term = self.persistent_state.lock().await.current_term();
 
         loop {
             let unboxed_heartbeat_timer = heartbeat_timer.as_mut();
@@ -282,6 +284,7 @@ impl Node<TokioFile> {
                 res = last_log_index_watch.changed() => {
                     if matches!(res, Err(_)) {
                         // sender is dropped, exit the loop
+                        debug!("last_log_index_watch sender dropped, exiting");
                         break;
                     }
                 }
@@ -301,7 +304,7 @@ impl Node<TokioFile> {
                     .await
                     .unwrap(); // FIXME: Error handling
                 let append_entries_request = pb::AppendEntriesRequest {
-                    term,
+                    term: leader_term,
                     leader_id: self.node_index,
                     prev_log_index: last_log_idx,
                     prev_log_term: last_log_term,
@@ -330,14 +333,22 @@ impl Node<TokioFile> {
                         }
 
                         // Not successful, can be either due to log matching or stale term
-                        let persistent_state = self.persistent_state.lock().await;
-                        if response.term > persistent_state.current_term() {
-                            warn!(
-                                "Current term {} is stale, we should use term {}",
+                        let mut persistent_state = self.persistent_state.lock().await;
+                        if response.term > leader_term {
+                            info!(
+                                "Current leader term {} is stale, peer {} says the term is {}, exiting and reverting to follower..",
+                                leader_term,
+                                peer_id,
                                 response.term,
-                                persistent_state.current_term()
                             );
-                            // TODO: Update term. Somehow need to inform the client process. Use a mpsc channel.
+                            persistent_state
+                                .update_current_term(response.term)
+                                .await
+                                .unwrap();
+                            // Notify the role listener if we hadn't already reverted back to follower
+                            self.role_informer.send_if_new(NodeRole::Follower);
+                            return follower_state;
+                            // TODO: Use a better method to inform the client process to kill the leader task
                         } else {
                             // Issue in log matching, decrement next index and try again
                             follower_state.next_index -= 1;
@@ -412,15 +423,18 @@ impl Node<TokioFile> {
             candidate_state: state::VolatileCandidate { votes_received: 0 },
             jobs: JoinSet::new(),
         };
+        let mut role_watch = self.role_informer.subscribe();
+        role_watch.borrow_and_update();
 
         loop {
             let unboxed_timer = timer.as_mut();
             tokio::select! {
-                () = unboxed_timer, if self.role.load(Ordering::SeqCst) != NodeRole::Leader => {
+                () = unboxed_timer, if *self.role_informer.borrow() != NodeRole::Leader => {
                     // Update election timer again. If it has elapsed then do election stuff
                     self.update_election_timer(&mut timer).await;
                     if timer.is_elapsed() {
-                        match self.role.load(Ordering::SeqCst) {
+                        let role = *self.role_informer.borrow();
+                        match role {
                             NodeRole::Follower => {
                                 self.reset_and_update_election_timer(&mut timer).await;
                                 state.candidate_state = self.become_candidate(&mut state).await?;
@@ -446,47 +460,76 @@ impl Node<TokioFile> {
                                 error!("Some task panicked..");
                             }
                         }
-                        Ok(TaskResult::VoteResponse(vote_response)) => {
-                            if vote_response.vote_granted {
+                        Ok(TaskResult::VoteResponse{response: vote_response, candidate_term}) => {
+                            let current_term = self.persistent_state.lock().await.current_term();
+                            if current_term != candidate_term {
+                                debug!("Received stale vote response {:?} for term {}, when current term is {}", vote_response, candidate_term, current_term);
+                            } else if vote_response.vote_granted {
                                 trace!("Received vote");
-                                if matches!(self.role.load(Ordering::SeqCst), NodeRole::Candidate) {
+                                if matches!(*self.role_informer.borrow(), NodeRole::Candidate) {
                                     state.candidate_state.votes_received += 1;
                                     if state.candidate_state.votes_received > (1 + self.peers.len()) / 2 {
-                                        info!("Elected as leader woohoo");
-                                        // TODO: Start task that sends append entries RPCs in loop to everyone
-                                        // That task will have ownership of volatile Leader state and also
+                                        // Start task that sends append entries RPCs in loop to everyone
+                                        // The task has ownership of volatile Leader state and also
                                         // the heartbeat timer
                                         let node = Arc::clone(&self);
                                         let entries_receiver = entries_receiver.clone();
+                                        let mut role_watch = self.role_informer.subscribe();
+                                        // ^This watch will indicate if a new leader has been elected, and we should clean up
+                                        // the leader process
+                                        let old_role = self.role_informer.send_if_new(NodeRole::Leader);
+                                        role_watch.borrow_and_update();
+
+                                        info!("Elected as leader for term {}, old role = {:?}", current_term, old_role);
                                         state.jobs.spawn(async move {
-                                            node.send_entries_to_followers(entries_receiver.clone()).await;
-                                            TaskResult::LeaderExit
+                                            tokio::select! {
+                                                () = node.send_entries_to_followers(entries_receiver) => {
+                                                    TaskResult::LeaderExit
+                                                }
+                                                res = role_watch.changed() => {
+                                                    match res {
+                                                        Err(_) => {
+                                                            // sender is dropped.. That's not possible, just panic
+                                                            panic!("last_leader_message_time_watch sender dropped, which means the node was dropped. But that isn't possible, so just panicking");
+                                                        }
+                                                        Ok(_) => {
+                                                            info!("Role changed to {:?}, probably new leader got elected, ending our syncing", *role_watch.borrow_and_update());
+                                                            TaskResult::NewLeaderElected
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         });
-                                        self.role.store(NodeRole::Leader, Ordering::SeqCst);
                                     }
-                                } else {
-                                    // This can happen when one response was delayed and we got majority votes before
-                                    debug!("Received vote response from peer, however current role is not candidate");
                                 }
                             } else {
                                 let mut persistent_state = self.persistent_state.lock().await;
                                 if vote_response.term > persistent_state.current_term() {
-                                    // Our term was stale, update it and abort all
+                                    // Our term was stale, update it and revert to follower
                                     trace!(current_term = persistent_state.current_term(), vote_response.term);
                                     persistent_state.update_current_term(vote_response.term).await?;
-                                    state.jobs.shutdown().await;
+                                    self.role_informer.send_if_new(NodeRole::Follower);
                                 }
                             }
                         }
-                        Ok(TaskResult::VoteFail(peer_id)) => {
-                            if matches!(self.role.load(Ordering::SeqCst), NodeRole::Candidate) {
+                        Ok(TaskResult::VoteFail{peer_id, candidate_term}) => {
+                            if candidate_term == self.persistent_state.lock().await.current_term() && matches!(*self.role_informer.borrow(), NodeRole::Candidate) {
                                 self.request_vote(&mut state, peer_id).await;
                             }
                         }
-                        Ok(TaskResult::LeaderExit) => {
-                            // TODO: Handle this
-                            info!("Leader task exited, will check and probably start election process again idk");
+                        Ok(TaskResult::LeaderExit | TaskResult::NewLeaderElected) => {
+                            self.role_informer.send_if_new(NodeRole::Follower);
+                            self.update_election_timer(&mut timer).await;
+                            info!("Leader task exited with result LeaderExit or NewLeaderElected, reverting to follower if not already and starting election timer");
                         }
+                    }
+                }
+                Ok(_) = role_watch.changed() => {
+                    let role = *role_watch.borrow_and_update();
+                    if role == NodeRole::Follower {
+                        debug!("Role changed to follower, restarting election timer and dropping all jobs");
+                        state.jobs.shutdown().await;
+                        self.update_election_timer(&mut timer).await;
                     }
                 }
             };
@@ -501,8 +544,9 @@ impl Node<TokioFile> {
             .expect("Expected peer_id to be valid");
         let mut rpc_client = peer.rpc_client.clone();
 
+        let candidate_term = self.persistent_state.lock().await.current_term();
         let request_votes_request = pb::VoteRequest {
-            term: self.persistent_state.lock().await.current_term(),
+            term: candidate_term,
             candidate_id: self.node_index,
             last_log_index: 0, // TODO
             last_log_term: 0,
@@ -510,28 +554,33 @@ impl Node<TokioFile> {
         let request = tonic::Request::new(request_votes_request.clone());
 
         state.jobs.spawn(async move {
-            trace!("Running job to request vote for peer id {}", peer_id);
+            // trace!("Running job to request vote for peer id {}", peer_id);
             match rpc_client.request_vote(request).await {
-                Err(e) => {
-                    trace!("Request to vote to peer {} failed: {}", peer_id, e);
-                    TaskResult::VoteFail(peer_id)
+                Err(_) => {
+                    // trace!("Request to vote to peer {} failed: {}", peer_id, e);
+                    TaskResult::VoteFail {
+                        peer_id,
+                        candidate_term,
+                    }
                 }
                 Ok(response) => {
                     let response = response.into_inner();
-                    TaskResult::VoteResponse(response)
+                    TaskResult::VoteResponse {
+                        response,
+                        candidate_term,
+                    }
                 }
             }
         });
     }
 
-    #[tracing::instrument(skip(self), fields(id = self.node_index))]
+    #[tracing::instrument(skip_all, fields(id = self.node_index))]
     async fn become_candidate(&self, state: &mut NodeClientState) -> Result<VolatileCandidate> {
         // convert to candidate and request votes.
         // Drop previous RPCs, might be due to a split vote
-        trace!("Becoming candidate");
         state.jobs.shutdown().await;
         let candidate_state = state::VolatileCandidate { votes_received: 0 };
-        self.role.store(NodeRole::Candidate, Ordering::SeqCst);
+        let old_role = self.role_informer.send_if_new(NodeRole::Candidate);
 
         self.persistent_state
             .lock()
@@ -544,6 +593,11 @@ impl Node<TokioFile> {
                     self.node_index
                 )
             })?;
+        debug!(
+            "Became candidate for term {}, old role = {:?}",
+            self.persistent_state.lock().await.current_term(),
+            old_role
+        );
 
         // FIXME: Don't make this vec. Need to fix borrow checker issues
         let peer_ids: Vec<usize> = self.peers.keys().copied().collect();

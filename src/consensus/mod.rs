@@ -34,13 +34,19 @@ enum NodeRole {
     Leader,
 }
 
+#[derive(Debug)]
 enum TaskResult {
     // TODO: Rename
-    VoteResponse(pb::VoteResponse),
+    VoteResponse {
+        response: pb::VoteResponse,
+        candidate_term: u32,
+    },
     /// node index to which request failed, to retry
-    VoteFail(usize),
+    VoteFail { peer_id: usize, candidate_term: u32 },
     /// Task that was syncing logs to followers exited
     LeaderExit,
+    /// New leader got elected, so stopping leader process
+    NewLeaderElected,
 }
 
 /// Raft Node with members used for establishing consensus
@@ -48,13 +54,13 @@ pub struct Node<SFile: StateFile> {
     persistent_state: tokio::sync::Mutex<state::Persistent<SFile>>,
     node_index: u32,
     listen_addr: SocketAddr,
-    role: AtomicNodeRole,
     common_volatile_state: state::VolatileCommon,
 
     election_timeout: AtomicDuration,
     election_timer_distribution: Uniform<f32>,
     heartbeat_interval: Duration,
     /// This is used to reset the election timer, and is updated by server on receiving append entries RPCs
+    role_informer: watch::Sender<NodeRole>,
     last_leader_message_time: AtomicInstant,
 
     /// map from peer_id to PeerNode

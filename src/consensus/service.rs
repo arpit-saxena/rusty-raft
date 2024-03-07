@@ -1,16 +1,17 @@
 use std::sync::atomic::Ordering;
 
+use super::atomic_util::UpdateIfNew;
 use super::pb::raft_server::Raft;
 use super::pb::{
     AppendEntriesRequest, AppendEntriesResponse, PerformActionRequest, PerformActionResponse,
     VoteRequest, VoteResponse,
 };
-use super::NodeServer;
+use super::{NodeRole, NodeServer};
 
 use anyhow::Context;
 use tokio::time::Instant;
 use tonic::{Request, Response, Status};
-use tracing::trace;
+use tracing::{debug, trace};
 
 impl<StateFile: super::StateFile> NodeServer<StateFile> {
     fn update_last_leader_message_time(&self) -> Result<(), Status> {
@@ -33,24 +34,39 @@ impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
         request: Request<AppendEntriesRequest>,
     ) -> Result<Response<AppendEntriesResponse>, Status> {
         trace!("Append entries called");
-        self.update_last_leader_message_time()?;
-
         let mut persistent_state = self.node.persistent_state.lock().await;
         let request = request.into_inner();
 
-        let success =
-            if persistent_state.has_matching_entry(request.prev_log_index, request.prev_log_term) {
-                for entry in request.entries {
-                    persistent_state
-                        .add_log(&entry)
-                        .await
-                        .map_err(|e| Status::unavailable(e.to_string()))?;
-                    // TODO: If there's an error here, we probably need to restart the Node
-                }
-                true
-            } else {
-                false
-            };
+        let success = if request.term < persistent_state.current_term() {
+            debug!(
+                "Rejecting AppendEntries since its term {} is less than our term {}",
+                request.term,
+                persistent_state.current_term()
+            );
+            false
+        } else if persistent_state.has_matching_entry(request.prev_log_index, request.prev_log_term)
+        {
+            for entry in request.entries {
+                persistent_state
+                    .add_log(&entry)
+                    .await
+                    .map_err(|e| Status::unavailable(e.to_string()))?;
+                // TODO: If there's an error here, we probably need to restart the Node
+            }
+            if request.term >= persistent_state.current_term() {
+                let old_role = self.node.role_informer.send_if_new(NodeRole::Follower);
+                trace!("Got append entry with term {} >= current_term {}, reverting to follower, current role was {:?}", request.term, persistent_state.current_term(), old_role);
+            }
+            self.update_last_leader_message_time()?;
+
+            true
+        } else {
+            debug!(
+                "Didn't find matching entry with prev_log_index = {}, prev_log_term = {}",
+                request.prev_log_index, request.prev_log_term
+            );
+            false
+        };
 
         let reply = AppendEntriesResponse {
             term: persistent_state.current_term(),
@@ -66,6 +82,7 @@ impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
     ) -> Result<Response<VoteResponse>, Status> {
         let request = request.into_inner();
         let mut persistent_state = self.node.persistent_state.lock().await;
+        // let is_new_term = request.term > persistent_state.current_term();
 
         let vote_granted = if request.term < persistent_state.current_term() {
             false
