@@ -208,12 +208,12 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
         let mut log = Vec::new();
         // FIXME: Assuming if error is returned, we have reached EOF, however there can be other errors as well
         while let Ok(log_entry) = LogEntry::from_read(state_file).await {
-            trace!(
-                "Read log entry: index = {}, term = {}, length = {}",
-                log_entry.index.data,
-                log_entry.term.data,
-                log_entry.length.data
-            );
+            // trace!(
+            //     "Read log entry: index = {}, term = {}, length = {}",
+            //     log_entry.index.data,
+            //     log_entry.term.data,
+            //     log_entry.length.data
+            // );
             log.push(log_entry);
         }
         Ok(log)
@@ -297,9 +297,15 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
         }
         false
     }
+
     pub fn last_log_index(&self) -> u64 {
         self.log.last().map(|entry| entry.index.data).unwrap_or(0)
     }
+
+    pub fn last_log_term(&self) -> u32 {
+        self.log.last().map_or(0, |entry| entry.term.data)
+    }
+
     // Very very inefficient implementation, just for completeness purposes
     pub async fn get_entries_from(&mut self, index: u64) -> Result<AppendLogEntry, StateError> {
         let mut prev_log_index = 0;

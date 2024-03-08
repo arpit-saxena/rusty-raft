@@ -85,7 +85,6 @@ impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
     ) -> Result<Response<VoteResponse>, Status> {
         let request = request.into_inner();
         let mut persistent_state = self.node.persistent_state.lock().await;
-        // let is_new_term = request.term > persistent_state.current_term();
 
         let vote_granted = if request.term < persistent_state.current_term() {
             false
@@ -98,13 +97,29 @@ impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
             {
                 return Err(Status::internal("Error in updating current term"));
             }
-            // TODO: Check log matching
-            match persistent_state
-                .grant_vote_if_possible(request.candidate_id)
-                .await
-            {
-                Ok(voted) => voted,
-                Err(_) => return Err(Status::internal("Error in granting vote")),
+            
+            let our_last_log_term = persistent_state.last_log_term() as i32;
+            // FIXME: UGHHGHGHGHGH
+            let our_last_log_index = persistent_state.last_log_index();
+            let candidate_log_up_to_date = if request.last_log_term != our_last_log_term {
+                request.last_log_term >= our_last_log_term
+            } else if request.last_log_index != our_last_log_index {
+                request.last_log_index >= our_last_log_index
+            } else {
+                true
+            };
+            trace!(our_last_log_term, our_last_log_index, request.last_log_term, request.last_log_index);
+
+            if !candidate_log_up_to_date {
+                false
+            } else {
+                match persistent_state
+                    .grant_vote_if_possible(request.candidate_id)
+                    .await
+                {
+                    Ok(voted) => voted,
+                    Err(_) => return Err(Status::internal("Error in granting vote")),
+                }
             }
         };
 

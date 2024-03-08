@@ -600,12 +600,17 @@ impl Node<TokioFile> {
             .expect("Expected peer_id to be valid");
         let mut rpc_client = peer.rpc_client.clone();
 
-        let candidate_term = self.persistent_state.lock().await.current_term();
+        let persistent_state = self.persistent_state.lock().await;
+        let candidate_term = persistent_state.current_term();
+        let last_log_index = persistent_state.last_log_index();
+        let last_log_term = persistent_state.last_log_term() as i32; // FIXME: UGHH
+        std::mem::drop(persistent_state);
+
         let request_votes_request = pb::VoteRequest {
             term: candidate_term,
             candidate_id: self.node_index,
-            last_log_index: 0, // TODO
-            last_log_term: 0,
+            last_log_index,
+            last_log_term,
         };
         let request = tonic::Request::new(request_votes_request.clone());
 
