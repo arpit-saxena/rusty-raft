@@ -153,9 +153,7 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
             state_file.write_u32_le(STATE_FILE_VERSION).await?;
 
             current_term = FileData::from_state_file_write(0, &mut state_file).await?;
-            state_file.write_u32_le(current_term.data).await?;
             voted_for = FileData::from_state_file_write(-1, &mut state_file).await?;
-            state_file.write_i32_le(voted_for.data).await?;
             log = vec![];
             operation_performed = "write";
             // TODO: Write an end marker
