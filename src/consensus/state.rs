@@ -1,7 +1,19 @@
-use std::{collections::HashMap, fmt::Debug, io::SeekFrom, mem::size_of};
+use std::{
+    collections::HashMap,
+    fmt::Debug,
+    io::SeekFrom,
+    mem::size_of,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 use thiserror::Error;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::{
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+    sync::watch,
+};
 use tonic::transport::Channel;
 use tracing::trace;
 
@@ -28,7 +40,7 @@ pub struct Persistent<StateFile: super::StateFile> {
 /// Volatile state that is stored on all servers
 pub struct VolatileCommon {
     /// index of highest log entry known to be committed (initialized to 0, increases monotonically)
-    pub commit_index: u64,
+    pub commit_index_informer: watch::Sender<u64>,
     /// index of highest log entry applied to state machine (initialized to 0, increases monotonically)
     pub last_applied: u64,
 }
@@ -38,9 +50,13 @@ pub struct VolatileFollowerState {
     /// index of the next log entry to send to that server (initialized to leader last log index + 1)
     pub next_index: u64,
     /// index of highest log entry known to be replicated on the server (initialized to 0, increases monotonically)
-    pub match_index: u64,
+    match_index: Arc<AtomicU64>,
     /// rpc client to send entries to follower
     pub rpc_client: RaftClient<Channel>,
+    /// Watch receiver that is used to inform if any new log has been added that should be synced to the followers
+    pub last_log_index_watch: watch::Receiver<u64>,
+    /// watch sender that is used to inform that match_index has been updated
+    match_index_notifier: Arc<watch::Sender<()>>,
 }
 
 /// Volatile state that is stored only on leaders
@@ -117,8 +133,8 @@ impl LogEntry {
 
 pub struct AppendLogEntry {
     pub entries: Vec<Vec<u8>>,
-    pub last_log_term: u32,
-    pub last_log_idx: u64,
+    pub prev_log_term: u32,
+    pub prev_log_index: u64,
 }
 
 impl<StateFile: super::StateFile> Persistent<StateFile> {
@@ -245,13 +261,12 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
             Ok(self.voted_for.data == candidate_id)
         }
     }
-    pub async fn add_log(&mut self, message: &[u8]) -> Result<(), StateError> {
+    pub async fn add_log(&mut self, message: &[u8], term: u32) -> Result<u64, StateError> {
         let log_index = self.log.last().map(|record| record.index.data).unwrap_or(0) + 1;
-        let term = self.current_term();
         let log_entry =
             LogEntry::from_write(log_index, term, message, &mut self.state_file).await?;
         self.log.push(log_entry);
-        Ok(())
+        Ok(log_index)
     }
     pub fn has_matching_entry(&self, index: u64, term: u32) -> bool {
         // index being 0 implies null entry (present in empty list)
@@ -287,23 +302,23 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
     }
     // Very very inefficient implementation, just for completeness purposes
     pub async fn get_entries_from(&mut self, index: u64) -> Result<AppendLogEntry, StateError> {
-        let mut log_idx = 0;
+        let mut prev_log_index = 0;
+        let mut prev_log_term = 0;
+        let mut prev_log_i = None;
+        // Assume that index is monotonically increasing
         for (i, entry) in self.log.iter().enumerate().rev() {
-            if entry.index.data == index {
-                log_idx = i;
+            if entry.index.data < index {
+                prev_log_index = entry.index.data;
+                prev_log_term = entry.term.data;
+                prev_log_i = Some(i);
+                // FIXME: UGH
                 break;
             }
         }
 
-        let (last_log_idx, last_log_term) = if log_idx > 0 {
-            let last_log_entry = &self.log[log_idx - 1];
-            (last_log_entry.index.data, last_log_entry.term.data)
-        } else {
-            (0, 0)
-        };
-
         let mut entries = Vec::new();
-        for i in log_idx..self.log.len() {
+        let log_i = prev_log_i.map_or(0, |prev_i| prev_i + 1);
+        for i in log_i..self.log.len() {
             let log_entry = &self.log[i];
             let current_pos = self.state_file.stream_position().await?;
             let length = log_entry.length.data as usize;
@@ -321,18 +336,20 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
 
         Ok(AppendLogEntry {
             entries,
-            last_log_term,
-            last_log_idx,
+            prev_log_term,
+            prev_log_index,
         })
     }
 }
 
 impl VolatileFollowerState {
-    pub fn new(next_index: u64, rpc_client: RaftClient<Channel>) -> VolatileFollowerState {
-        VolatileFollowerState {
-            next_index,
-            match_index: 0,
-            rpc_client,
+    /// Update match_index and notify. Assumes that match index will be monotonically increasing
+    pub fn update_match_index(&mut self, match_index: u64) {
+        let old_match_index = self.match_index.swap(match_index, Ordering::SeqCst);
+        // NOTE: Using >= to account for heartbeats i.e. empty AppendEntries response
+        assert!(match_index >= old_match_index);
+        if match_index > old_match_index {
+            self.match_index_notifier.send_replace(());
         }
     }
 }
@@ -341,23 +358,43 @@ impl VolatileLeader {
     pub fn new<StateFile: super::StateFile>(
         peers: &HashMap<usize, PeerNode>,
         persistent_state: &Persistent<StateFile>,
+        last_log_index_watch: watch::Receiver<u64>,
+        match_index_notifier: Arc<watch::Sender<()>>,
     ) -> VolatileLeader {
         let mut follower_states = HashMap::new();
         let next_index = persistent_state.last_log_index() + 1;
         for (peer_id, peer) in peers {
+            let rpc_client = peer.rpc_client.clone();
+            let last_log_index_watch = last_log_index_watch.clone();
+            let match_index_notifier = Arc::clone(&match_index_notifier);
             follower_states.insert(
                 *peer_id,
-                VolatileFollowerState::new(next_index, peer.rpc_client.clone()),
+                VolatileFollowerState {
+                    next_index,
+                    match_index: Arc::new(AtomicU64::new(0)),
+                    rpc_client,
+                    last_log_index_watch,
+                    match_index_notifier,
+                },
             );
         }
         VolatileLeader { follower_states }
+    }
+
+    pub fn next_indexes(&self) -> Vec<Arc<AtomicU64>> {
+        let mut vec = Vec::with_capacity(self.follower_states.len());
+        for follower_state in self.follower_states.values() {
+            vec.push(Arc::clone(&follower_state.match_index))
+        }
+        vec
     }
 }
 
 impl VolatileCommon {
     pub fn new() -> VolatileCommon {
+        let (tx, _) = watch::channel(0_u64);
         VolatileCommon {
-            commit_index: 0,
+            commit_index_informer: tx,
             last_applied: 0,
         }
     }

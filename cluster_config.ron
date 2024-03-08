@@ -1,5 +1,5 @@
 (
     data_path: "raft_data/",
-    election_timeout_interval: RangeInclusive(start: 200.0, end: 400.0),
-    heartbeat_interval: 80,
+    election_timeout_interval: RangeInclusive(start: 300.0, end: 500.0),
+    heartbeat_interval: 100,
 )

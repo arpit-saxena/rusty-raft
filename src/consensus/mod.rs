@@ -1,4 +1,8 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{atomic::AtomicI64, Arc},
+};
 
 use atomic_enum::atomic_enum;
 use rand::distributions::Uniform;
@@ -62,6 +66,7 @@ pub struct Node<SFile: StateFile> {
     /// This is used to reset the election timer, and is updated by server on receiving append entries RPCs
     role_informer: watch::Sender<NodeRole>,
     last_leader_message_time: AtomicInstant,
+    leader_id: AtomicI64,
 
     /// map from peer_id to PeerNode
     peers: HashMap<usize, PeerNode>,
@@ -69,7 +74,7 @@ pub struct Node<SFile: StateFile> {
 
 pub struct NodeServer<SFile: StateFile> {
     node: Arc<Node<SFile>>,
-    _entries_informer: watch::Sender<u64>,
+    last_log_index_informer: watch::Sender<u64>,
 }
 
 /// Represents information about a peer node that a particular node has and owns

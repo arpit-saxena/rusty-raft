@@ -33,8 +33,8 @@ impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
         &self,
         request: Request<AppendEntriesRequest>,
     ) -> Result<Response<AppendEntriesResponse>, Status> {
-        trace!("Append entries called");
         let mut persistent_state = self.node.persistent_state.lock().await;
+        let current_term = persistent_state.current_term();
         let request = request.into_inner();
 
         let success = if request.term < persistent_state.current_term() {
@@ -48,16 +48,19 @@ impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
         {
             for entry in request.entries {
                 persistent_state
-                    .add_log(&entry)
+                    .add_log(&entry, current_term)
                     .await
                     .map_err(|e| Status::unavailable(e.to_string()))?;
                 // TODO: If there's an error here, we probably need to restart the Node
             }
             if request.term >= persistent_state.current_term() {
-                let old_role = self.node.role_informer.send_if_new(NodeRole::Follower);
-                trace!("Got append entry with term {} >= current_term {}, reverting to follower, current role was {:?}", request.term, persistent_state.current_term(), old_role);
+                let _ = self.node.role_informer.send_if_new(NodeRole::Follower);
+                // trace!("Got append entry with term {} >= current_term {}, reverting to follower, current role was {:?}", request.term, persistent_state.current_term(), old_role);
             }
             self.update_last_leader_message_time()?;
+            self.node
+                .leader_id
+                .store(request.leader_id as i64, Ordering::SeqCst);
 
             true
         } else {
@@ -75,7 +78,7 @@ impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
         Ok(Response::new(reply))
     }
 
-    #[tracing::instrument(skip_all, id = self.node_common.node_index)]
+    #[tracing::instrument(skip_all, fields(id = self.node.node_index))]
     async fn request_vote(
         &self,
         request: Request<VoteRequest>,
@@ -118,11 +121,61 @@ impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
         Ok(Response::new(vote_response))
     }
 
-    #[tracing::instrument(skip_all, id = self.node_common.node_index)]
+    #[tracing::instrument(skip_all, fields(id = self.node.node_index))]
     async fn perform_action(
         &self,
-        _request: Request<PerformActionRequest>,
+        request: Request<PerformActionRequest>,
     ) -> Result<Response<PerformActionResponse>, Status> {
-        todo!();
+        let request = request.into_inner();
+
+        trace!("Received perform_action request {:?}", request);
+
+        // FIXME: [URGENT] There's a race condition between getting current term and leader_id. If leader_id updates after we got lock
+        // on the mutex, then we'll be committing a log with the wrong term :/
+        let mut persistent_state = self.node.persistent_state.lock().await;
+        let current_term = persistent_state.current_term();
+        let leader_id = self.node.leader_id.load(Ordering::SeqCst) as u32; // TODO: sighhhh
+        if leader_id != self.node.node_index {
+            let response = PerformActionResponse {
+                success: false,
+                leader_id,
+            };
+            return Ok(Response::new(response));
+        }
+
+        match persistent_state
+            .add_log(&request.action, current_term)
+            .await
+        {
+            Err(e) => {
+                return Err(Status::from_error(Box::new(e)));
+            }
+            Ok(log_index) => {
+                std::mem::drop(persistent_state);
+                self.last_log_index_informer.send_replace(log_index);
+
+                // Added to log, now just need to wait for commit index to increase and respond
+                let mut receiver = self
+                    .node
+                    .common_volatile_state
+                    .commit_index_informer
+                    .subscribe();
+                if receiver
+                    .wait_for(|commit_idx| *commit_idx >= log_index)
+                    .await
+                    .is_err()
+                {
+                    Response::new(Status::internal(
+                        "commit_index_informer dropped, shouldn't be possible",
+                    ));
+                }
+
+                let response = PerformActionResponse {
+                    success: true,
+                    leader_id,
+                };
+                Ok(Response::new(response))
+            }
+        }
     }
 }
