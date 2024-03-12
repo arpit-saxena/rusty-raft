@@ -2,9 +2,9 @@ use std::{
     collections::HashMap,
     fmt::Debug,
     io::SeekFrom,
-    mem::size_of,
+    mem::{size_of, size_of_val},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc,
     },
 };
@@ -15,14 +15,28 @@ use tokio::{
     sync::watch,
 };
 use tonic::transport::Channel;
-use tracing::trace;
+use tracing::{debug, trace, warn};
 
-use super::{macro_util::GenericByteIO, pb::raft_client::RaftClient, PeerNode};
+use super::{
+    macro_util::GenericByteIO,
+    pb::{self, raft_client::RaftClient},
+    PeerNode,
+};
 
 struct LogEntry {
-    index: FileData<u64>,
+    index: usize,
     term: FileData<u32>,
     length: FileData<u64>,
+}
+
+struct Log {
+    // TODO: To support snapshotting, keep a snapshot, and the log would have a start index
+    /// Log entries; all logs might not be applied
+    entries: Vec<LogEntry>,
+    /// index of last log
+    last_log_idx: usize,
+    /// log entries start position in file
+    start_position: u64,
 }
 
 /// This State is updated on stable storage before responding to RPCs
@@ -32,7 +46,7 @@ pub struct Persistent<StateFile: super::StateFile> {
     /// candidateId that received vote in current term (or -1 if not voted)
     voted_for: FileData<i32>, // TODO: Maybe store reference to PeerNode?
     /// logbook, vector of LogEntry; all logs might not be applied
-    log: Vec<LogEntry>,
+    log: Log,
     /// file like object that will interact with storage to read/write persistent state
     state_file: StateFile,
 }
@@ -40,7 +54,7 @@ pub struct Persistent<StateFile: super::StateFile> {
 /// Volatile state that is stored on all servers
 pub struct VolatileCommon {
     /// index of highest log entry known to be committed (initialized to 0, increases monotonically)
-    pub commit_index_informer: watch::Sender<u64>,
+    pub commit_index_informer: watch::Sender<usize>,
     /// index of highest log entry applied to state machine (initialized to 0, increases monotonically)
     pub last_applied: u64,
 }
@@ -48,13 +62,13 @@ pub struct VolatileCommon {
 /// Volatile per-follower state that is stored only for a leader
 pub struct VolatileFollowerState {
     /// index of the next log entry to send to that server (initialized to leader last log index + 1)
-    pub next_index: u64,
+    pub next_index: usize,
     /// index of highest log entry known to be replicated on the server (initialized to 0, increases monotonically)
-    match_index: Arc<AtomicU64>,
+    match_index: Arc<AtomicUsize>,
     /// rpc client to send entries to follower
     pub rpc_client: RaftClient<Channel>,
     /// Watch receiver that is used to inform if any new log has been added that should be synced to the followers
-    pub last_log_index_watch: watch::Receiver<u64>,
+    pub last_log_index_watch: watch::Receiver<usize>,
     /// watch sender that is used to inform that match_index has been updated
     match_index_notifier: Arc<watch::Sender<()>>,
 }
@@ -87,54 +101,169 @@ pub enum StateError {
         supported_version: u32,
     },
 
+    #[error("Couldn't add log entry since log with previous index and term was not found")]
+    LogNotMatching,
+
     #[error(transparent)]
     IOError(#[from] std::io::Error),
+
+    #[error("Bug: {0}")]
+    Bug(String),
 }
 
 impl LogEntry {
-    async fn from_write<StateFile>(
-        index: u64,
+    async fn write_end_marker<StateFile>(state_file: &mut StateFile) -> Result<(), StateError>
+    where
+        StateFile: super::StateFile,
+    {
+        state_file.write_u32_le(0).await?; // term
+        state_file.seek(SeekFrom::Current(-4)).await?;
+        Ok(())
+    }
+
+    fn seek_position_after_self(&self) -> SeekFrom {
+        SeekFrom::Start(
+            self.length.position_from_start
+                + (size_of_val(&self.length.data) as u64)
+                + self.length.data,
+        )
+    }
+}
+
+impl Log {
+    async fn push<StateFile>(
+        &mut self,
         term: u32,
         log: &[u8],
         state_file: &mut StateFile,
-    ) -> Result<LogEntry, StateError>
+    ) -> Result<usize, StateError>
     where
         StateFile: super::StateFile,
     {
-        let index = FileData::from_state_file_write(index, state_file).await?;
         let term = FileData::from_state_file_write(term, state_file).await?;
         let length = FileData::from_state_file_write(log.len() as u64, state_file).await?;
         state_file.write_all(log).await?;
+        LogEntry::write_end_marker(state_file).await?;
         state_file.flush().await?; // Make sure the log is flushed to the disk
-        Ok(LogEntry {
+        let index = self.last_log_idx + 1;
+        // trace!("Pushing index {}, term {}, length {}", index, term.data, length.data);
+        let entry = LogEntry {
             index,
             term,
             length,
-        })
+        };
+        self.last_log_idx += 1;
+        self.entries.push(entry);
+
+        Ok(index)
     }
 
-    async fn from_read<StateFile>(state_file: &mut StateFile) -> Result<LogEntry, StateError>
+    async fn from_read<StateFile>(state_file: &mut StateFile) -> Result<Log, StateError>
     where
         StateFile: super::StateFile,
     {
-        let index = FileData::from_state_file_read(state_file).await?;
-        let term = FileData::from_state_file_read(state_file).await?;
-        let length = FileData::from_state_file_read(state_file).await?;
-        state_file
-            .seek(SeekFrom::Current(length.data as i64))
-            .await?;
-        Ok(LogEntry {
-            index,
-            term,
-            length,
+        let mut log_entries = Vec::new();
+        let mut index = 1;
+        let log_start_position = state_file.stream_position().await?;
+
+        loop {
+            let term: FileData<u32> = match FileData::from_state_file_read(state_file).await {
+                Ok(term) => {
+                    if term.data == 0 {
+                        let size_of_term: i64 = size_of_val(&term.data).try_into().unwrap();
+                        state_file.seek(SeekFrom::Current(-size_of_term)).await?;
+                        return Ok(Log {
+                            entries: log_entries,
+                            last_log_idx: index - 1,
+                            start_position: log_start_position,
+                        });
+                    }
+                    term
+                }
+                Err(StateError::IOError(e)) => {
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                        warn!("Encountered EOF while reading log entries, expected null entry.");
+                        return Ok(Log {
+                            entries: log_entries,
+                            last_log_idx: index - 1,
+                            start_position: log_start_position,
+                        });
+                    }
+                    return Err(StateError::IOError(e));
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            };
+            let length = FileData::from_state_file_read(state_file).await?;
+            state_file
+                .seek(SeekFrom::Current(length.data as i64))
+                .await?;
+
+            log_entries.push(LogEntry {
+                index,
+                term,
+                length,
+            });
+            index += 1;
+        }
+    }
+
+    async fn new<StateFile>(state_file: &mut StateFile) -> Result<Log, StateError>
+    where
+        StateFile: super::StateFile,
+    {
+        let log_start_position = state_file.stream_position().await?;
+        LogEntry::write_end_marker(state_file).await?;
+        Ok(Log {
+            entries: vec![],
+            last_log_idx: 0,
+            start_position: log_start_position,
         })
+    }
+
+    #[tracing::instrument(skip(self, message, state_file))]
+    async fn push_last_log_at_idx<StateFile>(
+        &mut self,
+        message: &[u8],
+        term: u32,
+        idx: usize,
+        state_file: &mut StateFile,
+    ) -> Result<(), StateError>
+    where
+        StateFile: super::StateFile,
+    {
+        assert!(idx > 0); // idx is 1-based idx
+        let idx = idx - 1;
+        if idx > self.entries.len() {
+            return Err(StateError::Bug(format!(
+                "push_last_log_at_idx: Adding log at idx > log length, which is {}",
+                self.entries.len()
+            )));
+        }
+
+        if idx < self.entries.len() {
+            debug!("Current length is {}, truncating it", self.entries.len());
+        }
+
+        self.entries.truncate(idx);
+        let position = self
+            .entries
+            .last()
+            .map_or(SeekFrom::Start(self.start_position), |entry| {
+                entry.seek_position_after_self()
+            });
+        state_file.seek(position).await?;
+        self.last_log_idx = self.entries.last().map_or(0, |entry| entry.index);
+        self.push(term, message, state_file).await?;
+        Ok(())
     }
 }
 
 pub struct AppendLogEntry {
-    pub entries: Vec<Vec<u8>>,
+    pub entries: Vec<pb::LogEntry>,
     pub prev_log_term: u32,
-    pub prev_log_index: u64,
+    pub prev_log_index: usize,
 }
 
 impl<StateFile: super::StateFile> Persistent<StateFile> {
@@ -170,9 +299,10 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
 
             current_term = FileData::from_state_file_write(0, &mut state_file).await?;
             voted_for = FileData::from_state_file_write(-1, &mut state_file).await?;
-            log = vec![];
+            log = Log::new(&mut state_file).await?;
             operation_performed = "write";
-            // TODO: Write an end marker
+            state_file.write_u32_le(0).await?; // term 0, for end marker
+            state_file.seek(SeekFrom::Current(-4)).await?; // TODO sigh
         } else {
             let version = state_file.read_u32_le().await?;
             if version > STATE_FILE_VERSION {
@@ -183,7 +313,7 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
             }
             current_term = FileData::from_state_file_read(&mut state_file).await?;
             voted_for = FileData::from_state_file_read(&mut state_file).await?;
-            log = Self::read_log(&mut state_file).await?;
+            log = Log::from_read(&mut state_file).await?;
             operation_performed = "read";
         }
 
@@ -193,7 +323,7 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
             STATE_FILE_VERSION,
             current_term,
             voted_for,
-            log.len(),
+            log.entries.len(),
         );
 
         Ok(Persistent {
@@ -202,21 +332,6 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
             log,
             state_file,
         })
-    }
-
-    async fn read_log(state_file: &mut StateFile) -> Result<Vec<LogEntry>, StateError> {
-        let mut log = Vec::new();
-        // FIXME: Assuming if error is returned, we have reached EOF, however there can be other errors as well
-        while let Ok(log_entry) = LogEntry::from_read(state_file).await {
-            // trace!(
-            //     "Read log entry: index = {}, term = {}, length = {}",
-            //     log_entry.index.data,
-            //     log_entry.term.data,
-            //     log_entry.length.data
-            // );
-            log.push(log_entry);
-        }
-        Ok(log)
     }
 
     pub fn current_term(&self) -> u32 {
@@ -250,6 +365,7 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
         );
         Ok(())
     }
+
     pub async fn grant_vote_if_possible(&mut self, candidate_id: u32) -> Result<bool, StateError> {
         let candidate_id = candidate_id as i32;
         if self.voted_for.data == -1 {
@@ -261,14 +377,34 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
             Ok(self.voted_for.data == candidate_id)
         }
     }
-    pub async fn add_log(&mut self, message: &[u8], term: u32) -> Result<u64, StateError> {
-        let log_index = self.log.last().map(|record| record.index.data).unwrap_or(0) + 1;
-        let log_entry =
-            LogEntry::from_write(log_index, term, message, &mut self.state_file).await?;
-        self.log.push(log_entry);
-        Ok(log_index)
+
+    pub async fn append_log(&mut self, message: &[u8], term: u32) -> Result<usize, StateError> {
+        self.log.push(term, message, &mut self.state_file).await
     }
-    pub fn has_matching_entry(&self, index: u64, term: u32) -> bool {
+
+    pub async fn add_log_entries(
+        &mut self,
+        messages: &Vec<pb::LogEntry>,
+        prev_log_index: usize,
+        prev_log_term: u32,
+    ) -> Result<(), StateError> {
+        if self.has_matching_entry(prev_log_index, prev_log_term) {
+            let mut log_idx = prev_log_index + 1;
+            for pb::LogEntry { term, entry } in messages {
+                // TODO: Add a function in log or edit push, to accept multiple entries
+                self.log
+                    .push_last_log_at_idx(entry, *term, log_idx, &mut self.state_file)
+                    .await?;
+                log_idx += 1;
+            }
+            Ok(())
+        } else {
+            Err(StateError::LogNotMatching)
+        }
+    }
+
+    // TODO: Move function to impl Log
+    pub fn has_matching_entry(&self, index: usize, term: u32) -> bool {
         // index being 0 implies null entry (present in empty list)
         if index == 0 {
             return true;
@@ -276,11 +412,11 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
 
         // INVARIANT: Every entry left has index less than current entry's index and
         // term less than or equal to the current entry's term
-        for entry in self.log.iter().rev() {
-            if entry.index.data < index {
+        for entry in self.log.entries.iter().rev() {
+            if entry.index < index {
                 return false;
             }
-            if entry.index.data > index {
+            if entry.index > index {
                 continue;
             }
             // => entry.index.data == index
@@ -298,23 +434,23 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
         false
     }
 
-    pub fn last_log_index(&self) -> u64 {
-        self.log.last().map(|entry| entry.index.data).unwrap_or(0)
+    pub fn last_log_index(&self) -> usize {
+        self.log.entries.last().map_or(0, |entry| entry.index)
     }
 
     pub fn last_log_term(&self) -> u32 {
-        self.log.last().map_or(0, |entry| entry.term.data)
+        self.log.entries.last().map_or(0, |entry| entry.term.data)
     }
 
     // Very very inefficient implementation, just for completeness purposes
-    pub async fn get_entries_from(&mut self, index: u64) -> Result<AppendLogEntry, StateError> {
+    pub async fn get_entries_from(&mut self, index: usize) -> Result<AppendLogEntry, StateError> {
         let mut prev_log_index = 0;
         let mut prev_log_term = 0;
         let mut prev_log_i = None;
         // Assume that index is monotonically increasing
-        for (i, entry) in self.log.iter().enumerate().rev() {
-            if entry.index.data < index {
-                prev_log_index = entry.index.data;
+        for (i, entry) in self.log.entries.iter().enumerate().rev() {
+            if entry.index < index {
+                prev_log_index = entry.index;
                 prev_log_term = entry.term.data;
                 prev_log_i = Some(i);
                 // FIXME: UGH
@@ -324,18 +460,25 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
 
         let mut entries = Vec::new();
         let log_i = prev_log_i.map_or(0, |prev_i| prev_i + 1);
-        for i in log_i..self.log.len() {
-            let log_entry = &self.log[i];
+        for i in log_i..self.log.entries.len() {
+            let log_entry = &self.log.entries[i];
             let current_pos = self.state_file.stream_position().await?;
             let length = log_entry.length.data as usize;
-            self.state_file.seek(log_entry.length.position).await?;
+            self.state_file
+                .seek(SeekFrom::Start(log_entry.length.position_from_start))
+                .await?;
             self.state_file
                 .seek(SeekFrom::Current(size_of::<u64>() as i64))
                 .await?;
-            let mut entry = Vec::with_capacity(length);
+            let mut log = Vec::with_capacity(length);
+            log.resize(length, b'0');
             self.state_file
-                .read_exact(&mut entry.as_mut_slice()[0..length])
+                .read_exact(&mut log.as_mut_slice()[0..length])
                 .await?;
+            let entry = pb::LogEntry {
+                entry: log,
+                term: log_entry.term.data,
+            };
             entries.push(entry);
             self.state_file.seek(SeekFrom::Start(current_pos)).await?;
         }
@@ -350,7 +493,7 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
 
 impl VolatileFollowerState {
     /// Update match_index and notify. Assumes that match index will be monotonically increasing
-    pub fn update_match_index(&mut self, match_index: u64) {
+    pub fn update_match_index(&mut self, match_index: usize) {
         let old_match_index = self.match_index.swap(match_index, Ordering::SeqCst);
         // NOTE: Using >= to account for heartbeats i.e. empty AppendEntries response
         assert!(match_index >= old_match_index);
@@ -364,7 +507,7 @@ impl VolatileLeader {
     pub fn new<StateFile: super::StateFile>(
         peers: &HashMap<usize, PeerNode>,
         persistent_state: &Persistent<StateFile>,
-        last_log_index_watch: watch::Receiver<u64>,
+        last_log_index_watch: watch::Receiver<usize>,
         match_index_notifier: Arc<watch::Sender<()>>,
     ) -> VolatileLeader {
         let mut follower_states = HashMap::new();
@@ -377,7 +520,7 @@ impl VolatileLeader {
                 *peer_id,
                 VolatileFollowerState {
                     next_index,
-                    match_index: Arc::new(AtomicU64::new(0)),
+                    match_index: Arc::new(AtomicUsize::new(0)),
                     rpc_client,
                     last_log_index_watch,
                     match_index_notifier,
@@ -387,7 +530,7 @@ impl VolatileLeader {
         VolatileLeader { follower_states }
     }
 
-    pub fn next_indexes(&self) -> Vec<Arc<AtomicU64>> {
+    pub fn next_indexes(&self) -> Vec<Arc<AtomicUsize>> {
         let mut vec = Vec::with_capacity(self.follower_states.len());
         for follower_state in self.follower_states.values() {
             vec.push(Arc::clone(&follower_state.match_index))
@@ -398,7 +541,7 @@ impl VolatileLeader {
 
 impl VolatileCommon {
     pub fn new() -> VolatileCommon {
-        let (tx, _) = watch::channel(0_u64);
+        let (tx, _) = watch::channel(0);
         VolatileCommon {
             commit_index_informer: tx,
             last_applied: 0,
@@ -411,7 +554,7 @@ struct FileData<T>
 where
     T: Debug + Copy,
 {
-    position: SeekFrom,
+    position_from_start: u64,
     data: T,
 }
 
@@ -430,7 +573,7 @@ where
         let position_from_start = state_file.stream_position().await?;
         state_file.write_little_endian(data).await?;
         Ok(Self {
-            position: SeekFrom::Start(position_from_start),
+            position_from_start,
             data,
         })
     }
@@ -443,7 +586,7 @@ where
         let position_from_start = state_file.stream_position().await?;
         let data = state_file.read_little_endian().await?;
         Ok(Self {
-            position: SeekFrom::Start(position_from_start),
+            position_from_start,
             data,
         })
     }
@@ -457,7 +600,9 @@ where
         StateFile: super::StateFile + GenericByteIO<T>,
     {
         let current_position = state_file.stream_position().await?;
-        state_file.seek(self.position).await?;
+        state_file
+            .seek(SeekFrom::Start(self.position_from_start))
+            .await?;
         state_file.write_little_endian(data).await?;
         state_file.flush().await?; // Be really sure this value is written to disk
         self.data = data;

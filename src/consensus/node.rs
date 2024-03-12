@@ -7,7 +7,7 @@ use std::ops::{Deref, RangeInclusive};
 use std::path::{Path, PathBuf};
 
 use std::pin::Pin;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use crate::consensus::state::AppendLogEntry;
@@ -243,7 +243,7 @@ impl Node<TokioFile> {
     #[tracing::instrument(skip(self), fields(id = self.node_index))]
     pub async fn tick_forever(self) -> Result<Never> {
         let node = Arc::new(self);
-        let (last_log_index_informer, last_log_index_receiver) = watch::channel(0_u64);
+        let (last_log_index_informer, last_log_index_receiver) = watch::channel(0_usize);
         let node_server = NodeServer {
             node: Arc::clone(&node),
             last_log_index_informer,
@@ -263,10 +263,10 @@ impl Node<TokioFile> {
 
     async fn listen_and_update_leader_commit(
         &self,
-        match_indexes: Vec<Arc<AtomicU64>>,
+        match_indexes: Vec<Arc<AtomicUsize>>,
         mut match_index_watch: watch::Receiver<()>,
     ) {
-        let mut current_match_indexes: Vec<u64> = match_indexes
+        let mut current_match_indexes: Vec<usize> = match_indexes
             .iter()
             .map(|atom| atom.load(Ordering::SeqCst))
             .collect();
@@ -344,14 +344,15 @@ impl Node<TokioFile> {
                     .get_entries_from(follower_state.next_index)
                     .await
                     .unwrap(); // FIXME: Error handling
-                let new_match_index = prev_log_index + (entries.len() as u64);
+                let new_match_index = prev_log_index + entries.len();
                 let append_entries_request = pb::AppendEntriesRequest {
                     term: leader_term,
                     leader_id: self.node_index,
-                    prev_log_index,
+                    prev_log_index: prev_log_index.try_into().unwrap(),
                     prev_log_term,
                     entries,
-                    leader_commit: *self.common_volatile_state.commit_index_informer.borrow(),
+                    leader_commit: *self.common_volatile_state.commit_index_informer.borrow()
+                        as u64,
                 };
 
                 match follower_state
@@ -413,7 +414,7 @@ impl Node<TokioFile> {
     #[tracing::instrument(skip_all, fields(id = self.node_index))]
     async fn send_entries_to_followers(
         self: Arc<Self>,
-        last_log_index_watch: tokio::sync::watch::Receiver<u64>,
+        last_log_index_watch: tokio::sync::watch::Receiver<usize>,
     ) {
         let mut heartbeat_timer = Box::pin(tokio::time::sleep(self.heartbeat_interval));
         let mut jobs = JoinSet::new(); // All jobs will be aborted when this is dropped
@@ -466,7 +467,7 @@ impl Node<TokioFile> {
     #[tracing::instrument(skip_all, fields(id = self.node_index))]
     async fn tick_client_forever(
         self: Arc<Self>,
-        last_log_index_watch: watch::Receiver<u64>,
+        last_log_index_watch: watch::Receiver<usize>,
     ) -> Result<Never> {
         // We start out as follower, and we never exit this function in usual case, so we can always
         // assume that using election timeout is fine here.
@@ -609,7 +610,7 @@ impl Node<TokioFile> {
         let request_votes_request = pb::VoteRequest {
             term: candidate_term,
             candidate_id: self.node_index,
-            last_log_index,
+            last_log_index: last_log_index.try_into().unwrap(),
             last_log_term,
         };
         let request = tonic::Request::new(request_votes_request.clone());

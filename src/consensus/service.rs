@@ -6,6 +6,7 @@ use super::pb::{
     AppendEntriesRequest, AppendEntriesResponse, PerformActionRequest, PerformActionResponse,
     VoteRequest, VoteResponse,
 };
+use super::state::StateError;
 use super::{NodeRole, NodeServer};
 
 use anyhow::Context;
@@ -37,38 +38,32 @@ impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
         let current_term = persistent_state.current_term();
         let request = request.into_inner();
 
-        let success = if request.term < persistent_state.current_term() {
+        let success = if request.term < current_term {
             debug!(
                 "Rejecting AppendEntries since its term {} is less than our term {}",
-                request.term,
-                persistent_state.current_term()
+                request.term, current_term,
             );
             false
-        } else if persistent_state.has_matching_entry(request.prev_log_index, request.prev_log_term)
-        {
-            for entry in request.entries {
-                persistent_state
-                    .add_log(&entry, current_term)
-                    .await
-                    .map_err(|e| Status::unavailable(e.to_string()))?;
-                // TODO: If there's an error here, we probably need to restart the Node
-            }
-            if request.term >= persistent_state.current_term() {
-                let _ = self.node.role_informer.send_if_new(NodeRole::Follower);
-                // trace!("Got append entry with term {} >= current_term {}, reverting to follower, current role was {:?}", request.term, persistent_state.current_term(), old_role);
-            }
+        } else {
+            // Revert to follower, if we received entries of newer term or stay a follower
+            let _ = self.node.role_informer.send_if_new(NodeRole::Follower);
             self.update_last_leader_message_time()?;
             self.node
                 .leader_id
                 .store(request.leader_id as i64, Ordering::SeqCst);
 
-            true
-        } else {
-            debug!(
-                "Didn't find matching entry with prev_log_index = {}, prev_log_term = {}",
-                request.prev_log_index, request.prev_log_term
-            );
-            false
+            match persistent_state
+                .add_log_entries(
+                    &request.entries,
+                    request.prev_log_index.try_into().unwrap(),
+                    request.prev_log_term,
+                )
+                .await
+            {
+                Ok(()) => true,
+                Err(StateError::LogNotMatching) => false,
+                Err(e) => return Err(Status::from_error(Box::new(e))),
+            }
         };
 
         let reply = AppendEntriesResponse {
@@ -97,10 +92,10 @@ impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
             {
                 return Err(Status::internal("Error in updating current term"));
             }
-            
+
             let our_last_log_term = persistent_state.last_log_term() as i32;
             // FIXME: UGHHGHGHGHGH
-            let our_last_log_index = persistent_state.last_log_index();
+            let our_last_log_index = persistent_state.last_log_index() as u64;
             let candidate_log_up_to_date = if request.last_log_term != our_last_log_term {
                 request.last_log_term >= our_last_log_term
             } else if request.last_log_index != our_last_log_index {
@@ -108,7 +103,12 @@ impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
             } else {
                 true
             };
-            trace!(our_last_log_term, our_last_log_index, request.last_log_term, request.last_log_index);
+            trace!(
+                our_last_log_term,
+                our_last_log_index,
+                request.last_log_term,
+                request.last_log_index
+            );
 
             if !candidate_log_up_to_date {
                 false
@@ -159,7 +159,7 @@ impl<StateFile: super::StateFile> Raft for NodeServer<StateFile> {
         }
 
         match persistent_state
-            .add_log(&request.action, current_term)
+            .append_log(&request.action, current_term)
             .await
         {
             Err(e) => {

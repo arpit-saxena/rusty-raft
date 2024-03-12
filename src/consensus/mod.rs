@@ -74,7 +74,7 @@ pub struct Node<SFile: StateFile> {
 
 pub struct NodeServer<SFile: StateFile> {
     node: Arc<Node<SFile>>,
-    last_log_index_informer: watch::Sender<u64>,
+    last_log_index_informer: watch::Sender<usize>,
 }
 
 /// Represents information about a peer node that a particular node has and owns

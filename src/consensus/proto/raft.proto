@@ -7,6 +7,11 @@ service Raft {
   rpc PerformAction (PerformActionRequest) returns (PerformActionResponse);
 }
 
+message LogEntry {
+  uint32 term = 1;
+  bytes entry = 2;
+}
+
 message AppendEntriesRequest {
   // leader's term
   uint32 term = 1;
@@ -18,7 +23,7 @@ message AppendEntriesRequest {
   uint32 prev_log_term = 4;
   // log entries to store (empty for heartbeat; may send more 
   // than one for efficiency)
-  repeated bytes entries = 5;
+  repeated LogEntry entries = 5;
   // leader's commitIndex
   uint64 leader_commit = 6;
 }
