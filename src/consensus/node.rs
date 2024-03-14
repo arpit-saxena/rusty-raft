@@ -272,19 +272,40 @@ impl Node<TokioFile> {
             .collect();
         let majority_index = match_indexes.len() / 2;
 
+        // FIXME: Blehhhh, kuch bhi, need to store this somewhere or take as argument
+        let leader_term = self.persistent_state.lock().await.current_term();
+
         loop {
             let (_, majority_match_index, _) =
                 current_match_indexes.select_nth_unstable(majority_index);
+            let mut majority_match_index = *majority_match_index;
+
+            // Find the term of the majority match index. If it is our term, then we can consider entries
+            // as committed otherwise we can only consider the entries to be committed which are replicated
+            // on all the servers
+            let majority_match_index_term = self
+                .persistent_state
+                .lock()
+                .await
+                .log_term_at_index(majority_match_index);
+            if majority_match_index_term != leader_term {
+                // TODO: As an optimization, we can consider the all logs to be committed up to least match index
+                debug!("Majority match index increased, but it's from term {} whereas our term is {}, so can't consider committed.", majority_match_index_term, leader_term);
+                majority_match_index = *current_match_indexes
+                    .iter()
+                    .min()
+                    .expect("Expect match index vector to be non empty");
+            }
+
             let old_commit_index = self
                 .common_volatile_state
                 .commit_index_informer
-                .send_replace(*majority_match_index);
-
-            if old_commit_index != *majority_match_index {
+                .send_if_new(majority_match_index);
+            if majority_match_index > old_commit_index {
                 // TODO: Apply newly committed log to state machine
                 info!(
                     "Commit index increased from {} to {}, need to apply to state machine",
-                    old_commit_index, *majority_match_index
+                    old_commit_index, majority_match_index
                 );
             }
 

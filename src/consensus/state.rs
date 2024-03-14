@@ -442,6 +442,17 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
         self.log.entries.last().map_or(0, |entry| entry.term.data)
     }
 
+    pub fn log_term_at_index(&self, index: usize) -> u32 {
+        if index == 0 {
+            return 0; // empty entry
+        }
+        let index = index - 1; // 0-based index
+        self.log
+            .entries
+            .get(index)
+            .map_or(0, |entry| entry.term.data)
+    }
+
     // Very very inefficient implementation, just for completeness purposes
     pub async fn get_entries_from(&mut self, index: usize) -> Result<AppendLogEntry, StateError> {
         let mut prev_log_index = 0;
