@@ -301,8 +301,6 @@ impl<StateFile: super::StateFile> Persistent<StateFile> {
             voted_for = FileData::from_state_file_write(-1, &mut state_file).await?;
             log = Log::new(&mut state_file).await?;
             operation_performed = "write";
-            state_file.write_u32_le(0).await?; // term 0, for end marker
-            state_file.seek(SeekFrom::Current(-4)).await?; // TODO sigh
         } else {
             let version = state_file.read_u32_le().await?;
             if version > STATE_FILE_VERSION {

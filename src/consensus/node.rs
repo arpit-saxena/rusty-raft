@@ -289,7 +289,6 @@ impl Node<TokioFile> {
                 .await
                 .log_term_at_index(majority_match_index);
             if majority_match_index_term != leader_term {
-                // TODO: As an optimization, we can consider the all logs to be committed up to least match index
                 debug!("Majority match index increased, but it's from term {} whereas our term is {}, so can't consider committed.", majority_match_index_term, leader_term);
                 majority_match_index = *current_match_indexes
                     .iter()
